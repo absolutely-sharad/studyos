@@ -6,10 +6,15 @@ export async function register() {
   const { log } = await import("@/lib/log");
   const { errors, warnings } = checkEnv(process.env);
   for (const w of warnings) log.warn(w);
-  if (errors.length === 0) return;
-  for (const e of errors) log.error(`Invalid configuration: ${e}`);
-  // Fail fast in production; in development the pages explain what is missing as you hit it.
-  if (process.env.NODE_ENV === "production") throw new Error(`Invalid configuration:\n- ${errors.join("\n- ")}`);
+  if (errors.length > 0) {
+    for (const e of errors) log.error(`Invalid configuration: ${e}`);
+    // Fail fast in production; in development the pages explain what is missing as you hit it.
+    if (process.env.NODE_ENV === "production") throw new Error(`Invalid configuration:\n- ${errors.join("\n- ")}`);
+    return;
+  }
+  // Pick up files a restart (or another instance) left waiting, and keep checking.
+  const { startQueueSweeper } = await import("@/lib/documents/process");
+  startQueueSweeper();
 }
 
 /** Every unhandled server error (pages, actions, route handlers) lands in the logs with its digest. */

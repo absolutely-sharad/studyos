@@ -5,11 +5,14 @@ import { MAX_UPLOAD_BYTES } from "@/lib/config";
 import { guessCategory } from "@/lib/documents/categorize";
 import { db } from "@/lib/db";
 import { detectKind } from "@/lib/documents/extract";
-import { processDocument } from "@/lib/documents/process";
+import { processPending } from "@/lib/documents/process";
+import { STALE_SECONDS } from "@/lib/documents/queue";
 import { CATEGORY_LABELS, toDocumentView } from "@/lib/documents/serialize";
+import { uploadGate } from "@/lib/documents/upload-gate";
 import { matchesKind, SAFE_MIME } from "@/lib/documents/validate";
 import { log } from "@/lib/log";
 import { hit, RULES, waitMessage } from "@/lib/rate-limit";
+import { QueueFullError } from "@/lib/semaphore";
 import { getActiveExam } from "@/lib/session";
 import { deleteStoredFile, saveFile } from "@/lib/storage";
 import type { DocumentCategory } from "@/generated/prisma/enums";
@@ -17,8 +20,7 @@ import type { DocumentCategory } from "@/generated/prisma/enums";
 export const maxDuration = 60;
 
 const MAX_FILES_PER_EXAM = 100;
-const IN_PIPELINE = ["UPLOADED", "EXTRACTING", "CHUNKING"];
-const STALE_MS = 5 * 60 * 1000;
+const IN_PIPELINE = ["EXTRACTING", "CHUNKING"];
 // Multipart framing and the other form fields add a little on top of the file itself.
 const MAX_BODY_BYTES = MAX_UPLOAD_BYTES + 256 * 1024;
 
@@ -38,12 +40,10 @@ export async function GET() {
   if (!ctx) return NextResponse.json({ documents: [] });
   const docs = await db.document.findMany({ where: { examId: ctx.exam.id, userId: ctx.userId }, orderBy: { createdAt: "asc" } });
 
-  // Recovery: files left mid-pipeline by a server restart are picked up again.
-  const stale = docs.filter((d) => IN_PIPELINE.includes(d.status) && Date.now() - d.updatedAt.getTime() > STALE_MS);
-  if (stale.length > 0) {
-    await db.document.updateMany({ where: { id: { in: stale.map((d) => d.id) } }, data: { status: "UPLOADED" } });
-    after(() => Promise.all(stale.map((d) => processDocument(d.id))));
-  }
+  // Recovery: the student's file list doubles as a nudge. Queued files, and files abandoned mid-read by a
+  // server that went away, are picked up (the queue claims them itself; this only makes sure someone is looking).
+  const abandoned = (d: (typeof docs)[number]) => IN_PIPELINE.includes(d.status) && Date.now() - d.updatedAt.getTime() > STALE_SECONDS * 1000;
+  if (docs.some((d) => d.status === "UPLOADED" || abandoned(d))) after(() => processPending());
   return NextResponse.json({ documents: docs.map(toDocumentView) });
 }
 
@@ -60,6 +60,20 @@ export async function POST(request: Request) {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES)
     return fail(`That file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, 413);
 
+  let response: NextResponse;
+  try {
+    response = await uploadGate.run(() => receive(request, ctx));
+  } catch (err) {
+    if (err instanceof QueueFullError) return fail("The server is busy right now. Your upload will be retried in a moment.", 503, { "Retry-After": "5" });
+    throw err;
+  }
+  // Reading the file happens after the response is sent; the client polls GET for real status.
+  if (response.status === 201) after(() => processPending());
+  return response;
+}
+
+/** Receives, checks and stores one file. Runs while holding an upload slot, because this is where the memory goes. */
+async function receive(request: Request, ctx: { userId: string; exam: { id: string } }): Promise<NextResponse> {
   let form: FormData;
   try {
     form = await request.formData();
@@ -104,8 +118,5 @@ export async function POST(request: Request) {
     await deleteStoredFile(storageKey).catch((e) => log.error("orphaned upload could not be removed", e, { storageKey }));
     throw err;
   }
-
-  // Extraction runs after the response is sent; the client polls GET for real status.
-  after(() => processDocument(doc.id));
   return NextResponse.json({ document: toDocumentView(doc) }, { status: 201 });
 }

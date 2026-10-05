@@ -45,26 +45,43 @@ function sizeLabel(bytes: number) {
   return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
+/** `retryAfterMs` is set when the server said it is busy (503): nothing is wrong with the file, so try again. */
+type Attempt = { error: string | null; retryAfterMs?: number };
+const MAX_BUSY_RETRIES = 6;
+
 /** XHR rather than fetch: it reports upload progress. */
-function uploadFile(file: File, category: string, onProgress: (p: number) => void): Promise<string | null> {
+function attemptUpload(file: File, category: string, onProgress: (p: number) => void): Promise<Attempt> {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/documents");
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(null);
+      if (xhr.status >= 200 && xhr.status < 300) return resolve({ error: null });
       let message = "Upload failed. Try again.";
       try {
         message = (JSON.parse(xhr.responseText) as { error?: string }).error ?? message;
       } catch {}
-      resolve(message);
+      if (xhr.status === 503) return resolve({ error: message, retryAfterMs: (Number(xhr.getResponseHeader("Retry-After")) || 5) * 1000 });
+      resolve({ error: message });
     };
-    xhr.onerror = () => resolve("Network error. Check your connection and retry.");
+    xhr.onerror = () => resolve({ error: "Network error. Check your connection and retry." });
     const body = new FormData();
     body.set("file", file);
     body.set("category", category);
     xhr.send(body);
   });
+}
+
+/** Resolves to an error message, or null on success. Waits and retries by itself while the server is busy. */
+async function uploadFile(file: File, category: string, onProgress: (p: number) => void): Promise<string | null> {
+  for (let attempt = 0; ; attempt++) {
+    const result = await attemptUpload(file, category, onProgress);
+    const wait = result.retryAfterMs;
+    if (wait === undefined || attempt >= MAX_BUSY_RETRIES) return result.error;
+    onProgress(0);
+    // The server's suggestion, plus a little randomness so a crowd of browsers doesn't all return at once.
+    await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 15_000) + Math.random() * 1500));
+  }
 }
 
 function StatusLine({ doc }: { doc: DocumentView }) {

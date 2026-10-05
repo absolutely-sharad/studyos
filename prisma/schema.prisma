@@ -271,6 +271,8 @@ model Document {
 
   @@index([examId, category])
   @@index([userId])
+  /// The processing queue: waiting files are found by status, oldest first.
+  @@index([status, createdAt])
   @@map("documents")
 }
 
