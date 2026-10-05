@@ -14,7 +14,11 @@ import type { WorkerReady, WorkerRequest, WorkerResponse } from "./worker-protoc
  *   PROCESSING_MODE=threads (default) | inline     inline analyses on the main thread (tests, or hosts without worker threads)
  *   PROCESSING_CONCURRENCY=3                       files read at the same time per server instance
  *   PROCESSING_TIMEOUT_SECONDS=180                 give up on one file after this long
- *   PROCESSING_WORKER_MEMORY_MB=768                memory ceiling for each worker
+ *   PROCESSING_WORKER_MEMORY_MB=768                memory ceiling for each worker (heap plus buffers)
+ *
+ * The ceiling has two parts. V8's own heap limit (`resourceLimits`) stops runaway objects, but it does not count the
+ * buffers a decompressor allocates, and a 1 MB file can inflate to gigabytes. So while a file is being read, the pool
+ * also checks the worker's heap plus buffers every 100 ms from outside and terminates it above the ceiling.
  */
 
 const envInt = (name: string, fallback: number) => {
@@ -25,6 +29,7 @@ export const processingConcurrency = () => envInt("PROCESSING_CONCURRENCY", 3);
 const timeoutMs = () => envInt("PROCESSING_TIMEOUT_SECONDS", 180) * 1000;
 const memoryMb = () => envInt("PROCESSING_WORKER_MEMORY_MB", 768);
 const READY_TIMEOUT_MS = 20_000;
+const WATCHDOG_MS = 100;
 const IDLE_MS = 60_000;
 
 const TIMEOUT_MESSAGE = "Reading this file took too long. Try splitting it into smaller files and uploading those.";
@@ -55,6 +60,7 @@ interface Pool {
   /** Set when workers can't start here. From then on files are read in-process, and that was logged as an error. */
   degraded: boolean;
   limitWarned: boolean;
+  watchdogWarned: boolean;
 }
 
 function defaultFactory(): Worker {
@@ -70,6 +76,7 @@ const pool = singleton<Pool>("document-pool", () => ({
   factory: defaultFactory,
   degraded: false,
   limitWarned: false,
+  watchdogWarned: false,
 }));
 
 function retire(slot: Slot) {
@@ -89,17 +96,29 @@ function release(slot: Slot) {
 }
 
 /**
- * A process-wide `--max-old-space-size` (for instance from NODE_OPTIONS) silently overrides each worker's own limit.
- * Then a pathological file could use that much memory, so say so once instead of letting the setting look effective.
+ * A process-wide `--max-old-space-size` (for instance from NODE_OPTIONS) overrides each worker's own heap limit. The
+ * memory watchdog still stops a worker that passes the ceiling, but only when it next looks (every 100 ms) rather
+ * than the moment V8 hits it, so a file can overshoot. Say so once instead of letting the setting look like a hard cap.
  */
 function warnIfMemoryLimitIgnored(actualMb: number | undefined) {
   if (pool.limitWarned || actualMb === undefined || process.env.PROCESSING_MODE === "inline") return;
   if (actualMb <= memoryMb() * 2 + 64) return;
   pool.limitWarned = true;
   log.warn(
-    `Document workers can use up to ${actualMb} MB each, not the ${memoryMb()} MB set by PROCESSING_WORKER_MEMORY_MB. ` +
-      "A --max-old-space-size flag (often set through NODE_OPTIONS) overrides it. Remove that flag, or size the container for the larger figure.",
+    `Document workers may use up to ${actualMb} MB of heap each, not the ${memoryMb()} MB set by PROCESSING_WORKER_MEMORY_MB, ` +
+      "because a --max-old-space-size flag (often set through NODE_OPTIONS) overrides V8's own limit. " +
+      "The memory watchdog still enforces PROCESSING_WORKER_MEMORY_MB, but only between its 100 ms checks. Remove that flag for a hard limit.",
   );
+}
+
+/** `worker.getHeapStatistics()` needs Node 22.16 or later. Without it only V8's own heap limit applies, so say so once. */
+function canWatchMemory(worker: Worker): boolean {
+  if (typeof worker.getHeapStatistics === "function") return true;
+  if (!pool.watchdogWarned) {
+    pool.watchdogWarned = true;
+    log.warn(`Node ${process.versions.node} cannot report a worker's memory use, so only V8's heap limit bounds a worker. A crafted file could use far more memory. Run Node 22.16 or later.`);
+  }
+  return false;
 }
 
 function spawn(): Slot {
@@ -151,6 +170,7 @@ function runOn(slot: Slot, request: WorkerRequest): Promise<Analysis> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(watchdog);
       worker.off("message", onMessage);
       worker.off("error", onError);
       worker.off("exit", onExit);
@@ -164,6 +184,27 @@ function runOn(slot: Slot, request: WorkerRequest): Promise<Analysis> {
         }),
       timeoutMs(),
     );
+    // Heap plus buffers, read from outside the worker, which answers even while the worker is busy decompressing.
+    let looking = false;
+    const watchdog = canWatchMemory(worker)
+      ? setInterval(async () => {
+          if (looking || settled) return;
+          looking = true;
+          try {
+            const stats = await worker.getHeapStatistics();
+            if (!settled && stats.total_heap_size + stats.external_memory > memoryMb() * 1024 * 1024)
+              finish(() => {
+                retire(slot);
+                reject(new DocumentError(OUT_OF_MEMORY_MESSAGE));
+              });
+          } catch {
+            // The worker has gone away; its exit or error event reports that.
+          } finally {
+            looking = false;
+          }
+        }, WATCHDOG_MS)
+      : undefined;
+    watchdog?.unref();
     function onMessage(message: WorkerReady | WorkerResponse) {
       if ("ready" in message || message.id !== request.id) return;
       finish(() => {
@@ -231,6 +272,7 @@ export async function shutdownPool() {
   for (const slot of slots) retire(slot);
   pool.degraded = false;
   pool.limitWarned = false;
+  pool.watchdogWarned = false;
 }
 
 /** Test hook: start workers some other way (for example a fake, or the real file through a TypeScript loader). */

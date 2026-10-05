@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { analyzeDocument } from "@/lib/documents/analyze";
 import { DocumentError, MAX_PDF_PAGES } from "@/lib/documents/extract";
+import { pdfBomb } from "./helpers/bomb";
 import { pdfWithPages } from "./helpers/pdf";
 
 // The pool reads these once, when it is first created, so they are set before anything imports it.
@@ -146,6 +147,54 @@ describe("a worker that misbehaves only takes down itself", () => {
     expect(err).toBeInstanceOf(DocumentError);
     expect(err.message).toMatch(/too large or complex/);
     expect(poolStats().workers).toBe(0);
+  });
+});
+
+describe("the memory watchdog (buffers that V8's heap limit doesn't count)", () => {
+  it("terminates a worker whose buffers pass the ceiling, with the friendly message, long before it finishes", async () => {
+    vi.stubEnv("PROCESSING_WORKER_MEMORY_MB", "200");
+    setWorkerFactory(counting(stub("buffer-hog-worker.mjs")));
+    const started = performance.now();
+    const err = await analyzeInWorker(new Uint8Array(syllabusPdf()), "pdf", "hog.pdf").catch((e) => e);
+    expect(err).toBeInstanceOf(DocumentError);
+    expect(err.message).toMatch(/too large or complex/);
+    expect(poolStats().workers).toBe(0);
+    // Left alone the stub would run for about 800 ms and reach 640 MB; the watchdog stops it well short of that.
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  it("leaves a worker alone while it stays under the ceiling", async () => {
+    vi.stubEnv("PROCESSING_WORKER_MEMORY_MB", "4096");
+    setWorkerFactory(stub("buffer-hog-worker.mjs"));
+    await expect(analyzeInWorker(new Uint8Array(syllabusPdf()), "pdf", "big-but-fine.pdf")).resolves.toMatchObject({ outcome: "needs-ocr" });
+    expect(poolStats().workers).toBe(1); // and the worker is kept for the next file
+  });
+
+  it("stops a real PDF that is small on disk and enormous once decompressed", async () => {
+    const bomb = pdfBomb(150);
+    expect(bomb.length).toBeLessThan(400_000); // a harmless-looking file
+    vi.stubEnv("PROCESSING_WORKER_MEMORY_MB", "120");
+    const err = await analyzeInWorker(new Uint8Array(bomb), "pdf", "bomb.pdf").catch((e) => e);
+    expect(err).toBeInstanceOf(DocumentError);
+    expect(err.message).toMatch(/too large or complex/);
+    expect(poolStats().workers).toBe(0);
+    // and the pool is still usable
+    vi.unstubAllEnvs();
+    await expect(analyzeInWorker(new Uint8Array(syllabusPdf()), "pdf", "ok.pdf")).resolves.toMatchObject({ outcome: "ready" });
+  }, 60_000);
+
+  it("says so once when this Node version can't report a worker's memory", async () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const noStats = () => {
+      const worker = realWorker();
+      Object.defineProperty(worker, "getHeapStatistics", { value: undefined });
+      return worker;
+    };
+    setWorkerFactory(noStats);
+    await analyzeInWorker(new Uint8Array(syllabusPdf()), "pdf", "a.pdf");
+    await analyzeInWorker(new Uint8Array(syllabusPdf()), "pdf", "b.pdf");
+    const notes = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("cannot report a worker's memory use"));
+    expect(notes).toHaveLength(1);
   });
 });
 
