@@ -262,6 +262,8 @@ model Document {
   pageCount            Int?
   extractionConfidence Float?
   error                String?
+  /// How many times the queue has started reading this file. A file that keeps killing the server stops being retried.
+  attempts             Int              @default(0)
   createdAt            DateTime         @default(now()) @db.Timestamptz(3)
   updatedAt            DateTime         @updatedAt @db.Timestamptz(3)
 

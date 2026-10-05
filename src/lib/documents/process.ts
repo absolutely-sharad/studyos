@@ -18,8 +18,10 @@ interface DrainState {
   running: Promise<void> | null;
   /** Someone asked for processing while a pass was already finishing: go round again before stopping. */
   again: boolean;
+  /** Set while the pass is waiting on files being read. Calling it sends the pass back to look for new files. */
+  wake: (() => void) | null;
 }
-const state = singleton<DrainState>("document-drain", () => ({ running: null, again: false }));
+const state = singleton<DrainState>("document-drain", () => ({ running: null, again: false, wake: null }));
 
 /**
  * Reads every waiting file, a few at a time, and resolves when none are left. Safe to call from anywhere, any
@@ -28,6 +30,8 @@ const state = singleton<DrainState>("document-drain", () => ({ running: null, ag
  */
 export function processPending(): Promise<void> {
   state.again = true;
+  // A pass that is busy reading a long file must still notice a small file that has just arrived and has a free slot.
+  state.wake?.();
   state.running ??= drain();
   return state.running;
 }
@@ -63,7 +67,10 @@ async function passUntilEmpty() {
       inFlight.add(job);
     }
     if (inFlight.size === 0) return;
-    await Promise.race(inFlight);
+    // Wait for a file to finish, or for someone to say there may be new ones.
+    const nudged = new Promise<void>((resolve) => (state.wake = resolve));
+    await Promise.race([...inFlight, nudged]);
+    state.wake = null;
   }
 }
 

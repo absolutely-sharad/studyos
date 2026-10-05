@@ -58,7 +58,7 @@ type Owner = Awaited<ReturnType<typeof seedUser>>;
 const SYLLABUS_TEXT = "Unit 1: Arrays, Linked lists, Stacks. Unit 2: Trees and Graph traversal. Syllabus and course outline for the semester examination. ".repeat(6);
 
 /** A waiting document. Pass `bytes` to also put a real file in storage for it. */
-async function addDocument(owner: Owner, opts: { name?: string; bytes?: Buffer; status?: "UPLOADED" | "EXTRACTING" | "CHUNKING" | "READY" | "FAILED" | "NEEDS_OCR"; category?: "NOTES" | "SYLLABUS"; categorySource?: "USER" | "NAME"; createdAt?: Date } = {}) {
+async function addDocument(owner: Owner, opts: { name?: string; bytes?: Buffer; status?: "UPLOADED" | "EXTRACTING" | "CHUNKING" | "READY" | "FAILED" | "NEEDS_OCR"; category?: "NOTES" | "SYLLABUS"; categorySource?: "USER" | "NAME"; createdAt?: Date; attempts?: number } = {}) {
   const name = opts.name ?? `doc-${unique()}.pdf`;
   const storageKey = `${owner.userId}/${unique()}-${name}`;
   if (opts.bytes) await storage.saveFile(storageKey, opts.bytes);
@@ -66,7 +66,7 @@ async function addDocument(owner: Owner, opts: { name?: string; bytes?: Buffer; 
     data: {
       examId: owner.examId, userId: owner.userId, filename: name, mimeType: "application/pdf", sizeBytes: opts.bytes?.length ?? 1,
       category: opts.category ?? "NOTES", categorySource: opts.categorySource ?? "NAME", storageKey,
-      status: opts.status ?? "UPLOADED", ...(opts.createdAt && { createdAt: opts.createdAt }),
+      status: opts.status ?? "UPLOADED", attempts: opts.attempts ?? 0, ...(opts.createdAt && { createdAt: opts.createdAt }),
     },
   });
 }
@@ -103,7 +103,7 @@ suite("claiming documents from the queue", () => {
     await drainQueue();
     const [heavy, light, other] = [await seedUser(), await seedUser(), await seedUser()];
     const base = Date.now() - 10 * 60_000;
-    const heavyDocs = [];
+    const heavyDocs: Awaited<ReturnType<typeof addDocument>>[] = [];
     for (let i = 0; i < 5; i++) heavyDocs.push(await addDocument(heavy, { createdAt: new Date(base + i * 1000) })); // arrived first, and there are many
     const lightDoc = await addDocument(light, { createdAt: new Date(base + 6000) });
     const otherDocs = [await addDocument(other, { createdAt: new Date(base + 7000) }), await addDocument(other, { createdAt: new Date(base + 8000) })];
@@ -111,6 +111,93 @@ suite("claiming documents from the queue", () => {
     expect(new Set(firstThree)).toEqual(new Set([heavyDocs[0].id, lightDoc.id, otherDocs[0].id]));
     const nextTwo = await queue.claimDocuments(2); // second turns: heavy's #2 and other's #2
     expect(new Set(nextTwo)).toEqual(new Set([heavyDocs[1].id, otherDocs[1].id]));
+  });
+
+  it("stays fair when files are claimed one at a time, which is how the app claims them", async () => {
+    await drainQueue();
+    const [heavy, light, other] = [await seedUser(), await seedUser(), await seedUser()];
+    const base = Date.now() - 10 * 60_000;
+    const heavyDocs: Awaited<ReturnType<typeof addDocument>>[] = [];
+    for (let i = 0; i < 6; i++) heavyDocs.push(await addDocument(heavy, { createdAt: new Date(base + i * 1000) }));
+    const lightDoc = await addDocument(light, { createdAt: new Date(base + 7000) });
+    const otherDoc = await addDocument(other, { createdAt: new Date(base + 8000) });
+    const order: string[] = [];
+    for (let i = 0; i < 8; i++) order.push(...(await queue.claimDocuments(1)));
+    const name = (id: string) => (id === lightDoc.id ? "light" : id === otherDoc.id ? "other" : `heavy${heavyDocs.findIndex((d) => d.id === id)}`);
+    // A claimed file still counts against its owner, so the students with one file each are not made to wait for all six.
+    expect(order.map(name)).toEqual(["heavy0", "light", "other", "heavy1", "heavy2", "heavy3", "heavy4", "heavy5"]);
+  });
+
+  it("stays fair in the real processing loop too: the others are started before the heavy uploader's later files", async () => {
+    await drainQueue();
+    const [heavy, light, other] = [await seedUser(), await seedUser(), await seedUser()];
+    const base = Date.now() - 10 * 60_000;
+    const pdf = pdfWithPages([SYLLABUS_TEXT]);
+    const heavyDocs: Awaited<ReturnType<typeof addDocument>>[] = [];
+    for (let i = 0; i < 6; i++) heavyDocs.push(await addDocument(heavy, { bytes: pdf, createdAt: new Date(base + i * 1000) }));
+    const lightDoc = await addDocument(light, { bytes: pdf, createdAt: new Date(base + 7000) });
+    const otherDoc = await addDocument(other, { bytes: pdf, createdAt: new Date(base + 8000) });
+    const real = queue.claimDocuments;
+    const claimed: string[] = [];
+    const spy = vi.spyOn(queue, "claimDocuments").mockImplementation(async (n) => {
+      const got = await real(n);
+      claimed.push(...got);
+      return got;
+    });
+    try {
+      await processing.processPending();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(claimed).toHaveLength(8);
+    // Three slots: the first three claims are one file from each student, not three of the heavy uploader's.
+    expect(new Set(claimed.slice(0, 3))).toEqual(new Set([heavyDocs[0].id, lightDoc.id, otherDoc.id]));
+  });
+
+  it("counts every start of a file, so it can be given up on", async () => {
+    await drainQueue();
+    const owner = await seedUser();
+    const doc = await addDocument(owner);
+    await queue.claimDocuments(1);
+    expect((await db.document.findUniqueOrThrow({ where: { id: doc.id } })).attempts).toBe(1);
+  });
+
+  it("gives up on a file that keeps being abandoned, instead of starting it again after every crash", async () => {
+    await drainQueue();
+    const owner = await seedUser();
+    const doc = await addDocument(owner);
+    // Three times the server picks it up and then dies mid-read; each time it is found abandoned 10 minutes later.
+    for (let attempt = 1; attempt <= queue.MAX_ATTEMPTS; attempt++) {
+      expect(await queue.claimDocuments(1)).toEqual([doc.id]);
+      expect((await db.document.findUniqueOrThrow({ where: { id: doc.id } })).attempts).toBe(attempt);
+      await ageBy(doc.id, 10);
+    }
+    // The fourth time it is not started: it is failed, with a message the student can act on.
+    expect(await queue.claimDocuments(1)).toEqual([]);
+    const done = await db.document.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(done.status).toBe("FAILED");
+    expect(done.error).toBe(queue.GAVE_UP_MESSAGE);
+    expect(await queue.claimDocuments(1)).toEqual([]);
+  });
+
+  it("still retries a file that was only interrupted once or twice (a deploy, a restart)", async () => {
+    await drainQueue();
+    const owner = await seedUser();
+    const doc = await addDocument(owner, { status: "EXTRACTING", attempts: 2 });
+    await ageBy(doc.id, 10);
+    expect(await queue.claimDocuments(1)).toEqual([doc.id]);
+    expect((await db.document.findUniqueOrThrow({ where: { id: doc.id } })).attempts).toBe(3);
+  });
+
+  it("the processing loop leaves a given-up file failed and doesn't read it", async () => {
+    await drainQueue();
+    const owner = await seedUser();
+    const doc = await addDocument(owner, { bytes: pdfWithPages([SYLLABUS_TEXT]), status: "EXTRACTING", attempts: queue.MAX_ATTEMPTS });
+    await ageBy(doc.id, 10);
+    await processing.processPending();
+    const done = await db.document.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(done).toMatchObject({ status: "FAILED", error: queue.GAVE_UP_MESSAGE });
+    expect(await db.documentChunk.count({ where: { documentId: doc.id } })).toBe(0);
   });
 
   it("leaves finished, failed and scanned files alone", async () => {
@@ -273,6 +360,33 @@ suite("processing the queue", () => {
       const late = await addDocument(owner, { bytes: syllabusPdf() });
       await Promise.all([pass, processing.processPending()]);
       expect([await statusOf(first.id), await statusOf(late.id)]).toEqual(["READY", "READY"]);
+    }
+  });
+
+  it("a small file that arrives while a long one is being read is started at once, not after the long one", async () => {
+    await drainQueue();
+    const owner = await seedUser();
+    const slow = await addDocument(owner, { name: "slow.pdf", bytes: syllabusPdf() });
+    const realAnalyze = pool.analyze;
+    const spy = vi.spyOn(pool, "analyze").mockImplementation(async (data, kind, filename) => {
+      if (filename === "slow.pdf") await new Promise((resolve) => setTimeout(resolve, 3000));
+      return realAnalyze(data, kind, filename);
+    });
+    try {
+      const pass = processing.processPending();
+      for (let i = 0; i < 100 && (await statusOf(slow.id)) !== "EXTRACTING"; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await statusOf(slow.id)).toBe("EXTRACTING");
+      const small = await addDocument(owner, { name: "small.pdf", bytes: syllabusPdf() });
+      void processing.processPending(); // what the upload route does after storing the file
+      const started = performance.now();
+      while ((await statusOf(small.id)) !== "READY" && performance.now() - started < 2500) await new Promise((resolve) => setTimeout(resolve, 25));
+      // The small file is finished while the big one is still being read: two slots were free.
+      expect(await statusOf(small.id)).toBe("READY");
+      expect(await statusOf(slow.id)).toBe("EXTRACTING");
+      await pass;
+      expect(await statusOf(slow.id)).toBe("READY");
+    } finally {
+      spy.mockRestore();
     }
   });
 
