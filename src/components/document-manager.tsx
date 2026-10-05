@@ -52,6 +52,8 @@ function sizeLabel(bytes: number) {
 type Attempt = { error: string | null; retryAfterMs?: number; dropped?: boolean };
 const MAX_BUSY_RETRIES = 6;
 const MAX_DROPPED_RETRIES = 2;
+/** Shown when the server stayed busy through every automatic retry. (The server's own wording promises a retry.) */
+const STILL_BUSY = "The server is still busy. Wait a minute, then press Retry.";
 
 /** XHR rather than fetch: it reports upload progress. */
 function attemptUpload(file: File, category: string, onProgress: (p: number) => void): Promise<Attempt> {
@@ -83,7 +85,8 @@ async function uploadFile(file: File, category: string, onProgress: (p: number) 
     const result = await attemptUpload(file, category, onProgress);
     const wait = result.retryAfterMs;
     if (result.dropped) dropped++;
-    if (wait === undefined || attempt >= MAX_BUSY_RETRIES || dropped > MAX_DROPPED_RETRIES) return result.error;
+    if (wait === undefined) return result.error;
+    if (attempt >= MAX_BUSY_RETRIES || dropped > MAX_DROPPED_RETRIES) return result.dropped ? result.error : STILL_BUSY;
     onProgress(0);
     // The server's suggestion, plus a little randomness so a crowd of browsers doesn't all return at once.
     await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 15_000) + Math.random() * 1500));

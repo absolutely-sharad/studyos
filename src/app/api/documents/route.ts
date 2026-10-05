@@ -12,7 +12,7 @@ import { BodyStalledError, BodyTooLargeError, readBody } from "@/lib/documents/r
 import { enterUpload, UPLOAD_BODY_IDLE_MS, UPLOAD_BODY_TOTAL_MS, UPLOAD_WAIT_MS, uploadGate } from "@/lib/documents/upload-gate";
 import { matchesKind, SAFE_MIME } from "@/lib/documents/validate";
 import { log } from "@/lib/log";
-import { hit, RULES, waitMessage } from "@/lib/rate-limit";
+import { hit, peek, RULES, waitMessage } from "@/lib/rate-limit";
 import { QueueFullError } from "@/lib/semaphore";
 import { getActiveExam } from "@/lib/session";
 import { deleteStoredFile, saveFile } from "@/lib/storage";
@@ -52,8 +52,10 @@ export async function POST(request: Request) {
   const ctx = await context();
   if (!ctx) return fail("Sign in and set up your exam first.", 401);
 
-  const verdict = await hit(RULES.upload, ctx.userId);
-  if (!verdict.ok) return fail(waitMessage(verdict), 429, { "Retry-After": String(verdict.retryAfterSec) });
+  // Already over the allowance? Say so before doing any work. The allowance is spent only once an upload is actually
+  // being received (below), so a "busy, retrying" answer never uses any of it up.
+  const allowance = await peek(RULES.upload, ctx.userId);
+  if (!allowance.ok) return fail(waitMessage(allowance), 429, { "Retry-After": String(allowance.retryAfterSec) });
 
   // Refuse oversized bodies before buffering them into memory. (Clients that don't send a length are
   // still caught by the size check below.)
@@ -66,7 +68,14 @@ export async function POST(request: Request) {
   if (!leave) return fail("You already have uploads in progress. This one will be retried in a moment.", 503, { "Retry-After": "3" });
   let response: NextResponse;
   try {
-    response = await uploadGate.run(() => receive(request, ctx), { waitMs: UPLOAD_WAIT_MS });
+    response = await uploadGate.run(
+      async () => {
+        const verdict = await hit(RULES.upload, ctx.userId);
+        if (!verdict.ok) return fail(waitMessage(verdict), 429, { "Retry-After": String(verdict.retryAfterSec) });
+        return receive(request, ctx);
+      },
+      { waitMs: UPLOAD_WAIT_MS },
+    );
   } catch (err) {
     if (err instanceof QueueFullError) return fail("The server is busy right now. Your upload will be retried in a moment.", 503, { "Retry-After": "5" });
     throw err;

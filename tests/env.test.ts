@@ -71,6 +71,11 @@ describe("checkEnv", () => {
     }
   });
 
+  it("warns when UPLOAD_CONCURRENCY is so low that a student's two parallel uploads must queue behind each other", () => {
+    for (const low of ["1", "2"]) expect(checkEnv({ ...good, UPLOAD_CONCURRENCY: low }).warnings.join(" ")).toMatch(/only one file at a time/);
+    for (const fine of ["3", "4"]) expect(checkEnv({ ...good, UPLOAD_CONCURRENCY: fine }).warnings).toEqual([]);
+  });
+
   it("checks PROCESSING_MODE", () => {
     expect(checkEnv({ ...good, PROCESSING_MODE: "threads" }).warnings).toEqual([]);
     expect(checkEnv({ ...good, PROCESSING_MODE: "inline" }).warnings).toEqual([]);

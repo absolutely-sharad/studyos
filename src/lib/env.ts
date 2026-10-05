@@ -62,6 +62,9 @@ export function checkEnv(env: Env): EnvReport {
     const value = get(name);
     if (value && !(Number.isInteger(Number(value)) && Number(value) >= 1)) warnings.push(`${name} should be a whole number of 1 or more; the default of ${fallback} is used.`);
   }
+  const uploads = Number(get("UPLOAD_CONCURRENCY"));
+  if (Number.isInteger(uploads) && uploads >= 1 && uploads < 3)
+    warnings.push(`UPLOAD_CONCURRENCY=${uploads} lets each student upload only one file at a time (the page sends two), so the second waits and retries. 3 or more avoids that.`);
   const mode = get("PROCESSING_MODE");
   if (mode && mode !== "threads" && mode !== "inline") warnings.push(`PROCESSING_MODE should be "threads" or "inline", not "${mode}"; "threads" is used.`);
 
