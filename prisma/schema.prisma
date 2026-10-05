@@ -380,3 +380,16 @@ enum CategorySource {
   NAME
   CONTENT
 }
+
+// ───────────── Operations ─────────────
+
+/// Fixed-window request counters (login, signup, upload, AI calls). Shared by every
+/// server instance, so limits hold on serverless and multi-replica deployments.
+model RateLimit {
+  key         String   @id
+  count       Int      @default(0)
+  windowStart DateTime @db.Timestamptz(3)
+
+  @@index([windowStart])
+  @@map("rate_limits")
+}
