@@ -177,13 +177,17 @@ Each worker has a memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 768) co
 
 The watchdog needs **Node 22.16 or later**. On an older Node the server logs a warning at the first upload and only the heap limit applies, which a crafted file can get around. The Docker image uses Node 22. `PROCESSING_MODE=inline` (or the automatic fallback when workers can't start) reads files inside the web process and has **no** memory protection.
 
-Measured on 21 MB PDFs: about 190 MB idle and about 900 MB at peak with 20 uploads in flight. The sizes below are estimates built from those numbers, not measurements, so watch memory after you deploy:
+Measured: about 190 MB idle, about 900 MB at peak with 20 large uploads in flight, and a worker that hits the ceiling takes the process to roughly the web baseline plus the whole ceiling (959 MB with the default). Memory a worker used is not always handed back to the operating system when it ends (875 MB idle after two decompression bombs, against 190 MB before), so plan for the peak, not the idle figure.
 
-| Container memory | Settings |
-| --- | --- |
-| 512 MB | `PROCESSING_CONCURRENCY=1`, `UPLOAD_CONCURRENCY=2`, `PROCESSING_WORKER_MEMORY_MB=256` |
-| 1 GB | `PROCESSING_CONCURRENCY=2`, `UPLOAD_CONCURRENCY=3` |
-| 2 GB or more | the defaults |
+Size the container so that **about 400 MB (the web process and upload buffers) + `PROCESSING_CONCURRENCY` × `PROCESSING_WORKER_MEMORY_MB`** fits. Ready-made combinations (computed from that rule, not each separately tested):
+
+| Container memory | `PROCESSING_CONCURRENCY` | `PROCESSING_WORKER_MEMORY_MB` | `UPLOAD_CONCURRENCY` |
+| --- | --- | --- | --- |
+| 1 GB | 2 | 256 | 3 |
+| 2 GB | 2 | 640 | 4 |
+| 4 GB or more | 3 (default) | 768 (default) | 4 (default) |
+
+Below 1 GB is not recommended: the web process alone needs 200 to 300 MB, and a worker ceiling under about 200 MB will refuse large PDFs.
 
 Avoid `--max-old-space-size` in `NODE_OPTIONS` (some guides recommend it). It is process-wide and overrides V8's heap limit for every worker. The watchdog still enforces `PROCESSING_WORKER_MEMORY_MB`, but only between its 100 ms checks, so a file can overshoot. If the flag is set, the server logs a warning at the first upload.
 
