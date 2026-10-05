@@ -55,6 +55,9 @@ export function StudySession({
   }, [running, mode, CYCLE, FOCUS]);
 
   useEffect(() => {
+    // The countdown stops itself at zero. This stays an effect, not derived state: `running` survives a
+    // switch to stopwatch or pomodoro, and a finished countdown must not start running again when that happens.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (mode === "countdown" && running && elapsed >= task.minutes * 60) setRunning(false);
   }, [elapsed, mode, running, task.minutes]);
 

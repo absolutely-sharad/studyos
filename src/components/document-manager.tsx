@@ -130,9 +130,16 @@ export function DocumentManager({ initial }: { initial: DocumentView[] }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const wasProcessing = useRef(initial.some((d) => IN_PROGRESS.has(d.status)));
   const docsRef = useRef(docs);
-  docsRef.current = docs;
+  useEffect(() => {
+    docsRef.current = docs;
+  });
 
-  useEffect(() => setDocs(initial), [initial]);
+  // Take the server's list whenever it is re-rendered with a new one (after router.refresh()).
+  const [seenInitial, setSeenInitial] = useState(initial);
+  if (initial !== seenInitial) {
+    setSeenInitial(initial);
+    setDocs(initial);
+  }
 
   const poll = useCallback(async () => {
     const res = await fetch("/api/documents", { cache: "no-store" });

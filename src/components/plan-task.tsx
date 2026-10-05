@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState, useTransition } from "react";
 import { editTask, setPinned } from "@/actions/tasks";
-import { Badge, Button, cx, inputBase, inputClass } from "@/components/ui";
+import { Badge, Button, cx, inputBase } from "@/components/ui";
 import type { TaskView } from "@/lib/dashboard";
 import { formatMinutes } from "@/lib/dates";
 

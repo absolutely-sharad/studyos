@@ -14,7 +14,7 @@ import {
   updateSubject,
   updateTopic,
 } from "@/actions/syllabus";
-import { Badge, Button, Notice, cx, inputBase, inputClass } from "@/components/ui";
+import { Badge, Button, Notice, cx, inputBase } from "@/components/ui";
 import { formatMinutes } from "@/lib/dates";
 
 export interface ReviewTopic {
