@@ -40,7 +40,9 @@ Respond with JSON only, no prose, in this shape:
 {"subjects":[{"name":"","topics":[{"name":"","chapter":"","aliases":[],"difficulty":3,"importance":3,"estimatedMinutes":120,"prerequisites":[]}]}]}`;
 
 export async function extractSyllabusWithAI(text: string, examName: string): Promise<SyllabusDraft> {
-  const client = new Anthropic();
+  // A long syllabus can take over a minute to write out. Give up after 100s and let the caller fall back to the
+  // built-in parser, rather than hang for the SDK's 10-minute default.
+  const client = new Anthropic({ timeout: 100_000, maxRetries: 1 });
   const response = await client.messages.create({
     model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5",
     max_tokens: 12000,

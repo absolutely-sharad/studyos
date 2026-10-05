@@ -17,7 +17,7 @@ export function AuthForm({
     <form action={formAction} className="space-y-4">
       {mode === "signup" && (
         <Field label="Name" htmlFor="name">
-          <input id="name" name="name" autoComplete="name" required className={inputClass} />
+          <input id="name" name="name" autoComplete="name" required defaultValue={state.name} className={inputClass} />
         </Field>
       )}
       <Field label="Email" htmlFor="email">

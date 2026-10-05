@@ -1,4 +1,4 @@
-import NextAuth, { type DefaultSession } from "next-auth";
+import NextAuth, { CredentialsSignin, type DefaultSession } from "next-auth";
 import type { Provider } from "next-auth/providers";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
@@ -6,6 +6,7 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { clientIp, emailSubject, hit, peek, RULES } from "@/lib/rate-limit";
 
 declare module "next-auth" {
   interface Session {
@@ -13,23 +14,45 @@ declare module "next-auth" {
   }
 }
 
+/** Thrown from `authorize` so the login form can tell "slow down" apart from "wrong password". */
+export class TooManyAttempts extends CredentialsSignin {
+  code = "rate_limited";
+}
+
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
+
+// A real cost-12 hash. Checking against it when the email is unknown makes "no such account"
+// take as long as "wrong password", so response time doesn't reveal which emails are registered.
+const TIMING_HASH = "$2b$12$AWw/6IfkM1/PWbVhHjd7KeNR/kmjdiTTUTSVyBbBRbHJKdUEUkei.";
 
 export const googleEnabled = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET);
 
 const providers: Provider[] = [
   Credentials({
     credentials: { email: {}, password: {} },
-    async authorize(raw) {
+    // This is the only place a password is ever checked, so the brute-force limits live here and
+    // also cover direct POSTs to /api/auth/callback/credentials, not just our login form.
+    async authorize(raw, request) {
       const parsed = credentialsSchema.safeParse(raw);
       if (!parsed.success) return null;
-      const user = await db.user.findUnique({ where: { email: parsed.data.email } });
-      if (!user?.passwordHash) return null;
-      const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
-      return ok ? { id: user.id, email: user.email, name: user.name, image: user.image } : null;
+      const { email, password } = parsed.data;
+
+      const [byAddress, byAccount] = await Promise.all([
+        hit(RULES.loginIp, clientIp(request.headers)),
+        peek(RULES.loginFailures, emailSubject(email)),
+      ]);
+      if (!byAddress.ok || !byAccount.ok) throw new TooManyAttempts();
+
+      const user = await db.user.findUnique({ where: { email } });
+      const matches = await bcrypt.compare(password, user?.passwordHash ?? TIMING_HASH);
+      if (!user?.passwordHash || !matches) {
+        await hit(RULES.loginFailures, emailSubject(email));
+        return null;
+      }
+      return { id: user.id, email: user.email, name: user.name, image: user.image };
     },
   }),
 ];
