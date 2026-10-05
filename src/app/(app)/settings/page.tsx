@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { signOutAction } from "@/app/(auth)/actions";
 import { SettingsForm } from "@/components/settings-form";
+import { DeleteAccount } from "@/components/delete-account";
 import { Button, Panel } from "@/components/ui";
 import { brand } from "@/lib/config";
 import { toDateKey } from "@/lib/dates";
@@ -41,6 +42,9 @@ export default async function SettingsPage() {
               Sign out
             </Button>
           </form>
+        </div>
+        <div className="mt-6">
+          <DeleteAccount email={user.email} />
         </div>
       </Panel>
 
