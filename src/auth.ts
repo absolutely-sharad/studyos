@@ -3,9 +3,10 @@ import type { Provider } from "next-auth/providers";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { log } from "@/lib/log";
+import { DUMMY_HASH, hashPassword, PasswordBusyError, verifyPassword } from "@/lib/password";
 import { clientIp, emailSubject, hit, peek, RULES } from "@/lib/rate-limit";
 
 declare module "next-auth" {
@@ -19,14 +20,28 @@ export class TooManyAttempts extends CredentialsSignin {
   code = "rate_limited";
 }
 
+/** The server is busy checking other passwords. Not the student's fault, so it is not counted as a failed attempt. */
+export class ServerBusy extends CredentialsSignin {
+  code = "busy";
+}
+
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 
-// A real cost-12 hash. Checking against it when the email is unknown makes "no such account"
-// take as long as "wrong password", so response time doesn't reveal which emails are registered.
-const TIMING_HASH = "$2b$12$AWw/6IfkM1/PWbVhHjd7KeNR/kmjdiTTUTSVyBbBRbHJKdUEUkei.";
+/** An older bcrypt hash, or scrypt with weaker settings, is replaced the moment its owner proves the password. */
+async function upgradeHash(userId: string, currentHash: string, password: string) {
+  try {
+    const upgraded = await hashPassword(password);
+    // Only if the hash is still the one we checked, so a concurrent change is never overwritten.
+    await db.user.updateMany({ where: { id: userId, passwordHash: currentHash }, data: { passwordHash: upgraded } });
+  } catch (err) {
+    // The sign-in itself succeeded. If we're busy or the write failed, the upgrade happens next time.
+    if (err instanceof PasswordBusyError) log.debug("password hash upgrade skipped: busy", { userId });
+    else log.error("password hash upgrade failed", err, { userId });
+  }
+}
 
 export const googleEnabled = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET);
 
@@ -47,11 +62,19 @@ const providers: Provider[] = [
       if (!byAddress.ok || !byAccount.ok) throw new TooManyAttempts();
 
       const user = await db.user.findUnique({ where: { email } });
-      const matches = await bcrypt.compare(password, user?.passwordHash ?? TIMING_HASH);
-      if (!user?.passwordHash || !matches) {
+      // Unknown emails are checked against a dummy hash so "no such account" takes as long as "wrong password".
+      let check;
+      try {
+        check = await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH);
+      } catch (err) {
+        if (err instanceof PasswordBusyError) throw new ServerBusy();
+        throw err;
+      }
+      if (!user?.passwordHash || !check.ok) {
         await hit(RULES.loginFailures, emailSubject(email));
         return null;
       }
+      if (check.needsRehash) await upgradeHash(user.id, user.passwordHash, password);
       return { id: user.id, email: user.email, name: user.name, image: user.image };
     },
   }),

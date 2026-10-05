@@ -1,12 +1,12 @@
 "use server";
 
-import bcrypt from "bcryptjs";
 import { headers } from "next/headers";
 import { AuthError } from "next-auth";
 import { z } from "zod";
-import { signIn, signOut, TooManyAttempts } from "@/auth";
+import { ServerBusy, signIn, signOut, TooManyAttempts } from "@/auth";
 import { db } from "@/lib/db";
 import { PrismaClientKnownRequestError } from "@/generated/prisma/internal/prismaNamespace";
+import { hashPassword, MAX_PASSWORD_BYTES, PasswordBusyError } from "@/lib/password";
 import { clientIp, hit, RULES, waitMessage } from "@/lib/rate-limit";
 
 export interface AuthState {
@@ -16,8 +16,7 @@ export interface AuthState {
   name?: string;
 }
 
-// bcrypt only reads the first 72 bytes, so a longer password would be silently truncated.
-const MAX_PASSWORD_BYTES = 72;
+const BUSY = "We're busy right now. Wait a few seconds and try again.";
 
 const signupSchema = z.object({
   name: z.string().trim().min(1, "Enter your name.").max(80),
@@ -25,7 +24,7 @@ const signupSchema = z.object({
   password: z
     .string()
     .min(8, "Use at least 8 characters for your password.")
-    .refine((p) => Buffer.byteLength(p) <= MAX_PASSWORD_BYTES, "Use a password of 72 bytes or fewer (about 72 characters)."),
+    .refine((p) => Buffer.byteLength(p) <= MAX_PASSWORD_BYTES, `Use a password of ${MAX_PASSWORD_BYTES} bytes or fewer.`),
 });
 
 async function signInWithPassword(email: string, password: string): Promise<AuthState> {
@@ -33,7 +32,9 @@ async function signInWithPassword(email: string, password: string): Promise<Auth
     await signIn("credentials", { email, password, redirectTo: "/dashboard" });
     return {};
   } catch (err) {
-    if (err instanceof TooManyAttempts || (err instanceof AuthError && (err as { code?: string }).code === "rate_limited"))
+    const code = err instanceof AuthError ? (err as { code?: string }).code : undefined;
+    if (err instanceof ServerBusy || code === "busy") return { error: BUSY, email };
+    if (err instanceof TooManyAttempts || code === "rate_limited")
       return { error: "Too many sign-in attempts. Wait a few minutes and try again.", email };
     if (err instanceof AuthError) return { error: "That email and password don't match an account.", email };
     throw err; // the success redirect is thrown, too
@@ -52,14 +53,16 @@ export async function signupAction(_: AuthState, form: FormData): Promise<AuthSt
   const existing = await db.user.findUnique({ where: { email: parsed.data.email } });
   if (existing) return { error: "An account with this email already exists. Sign in instead.", email, name };
 
+  let passwordHash: string;
   try {
-    await db.user.create({
-      data: {
-        name: parsed.data.name,
-        email: parsed.data.email,
-        passwordHash: await bcrypt.hash(parsed.data.password, 12),
-      },
-    });
+    passwordHash = await hashPassword(parsed.data.password);
+  } catch (err) {
+    if (err instanceof PasswordBusyError) return { error: BUSY, email, name };
+    throw err;
+  }
+
+  try {
+    await db.user.create({ data: { name: parsed.data.name, email: parsed.data.email, passwordHash } });
   } catch (err) {
     // Two sign-ups for the same address can both pass the check above; the unique index decides.
     if (err instanceof PrismaClientKnownRequestError && err.code === "P2002")
