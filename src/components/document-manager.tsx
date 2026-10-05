@@ -16,7 +16,7 @@ const STAGES = [
 ];
 const MAX_BYTES = 25 * 1024 * 1024;
 const MAX_BATCH = 20;
-const PARALLEL = 3;
+const PARALLEL = 2; // matches the server's per-account limit on uploads in progress
 const ACCEPT = /\.(pdf|docx|txt|md)$/i;
 
 type QueueItem = {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { QueueFullError, Semaphore } from "@/lib/semaphore";
+import { QueueFullError, QueueTimeoutError, Semaphore } from "@/lib/semaphore";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
@@ -99,6 +99,55 @@ describe("Semaphore", () => {
     });
     await Promise.all([waiter, newcomer]);
     expect(order).toEqual(["waiter", "newcomer"]);
+  });
+
+  describe("giving up after waiting too long (waitMs)", () => {
+    it("rejects a waiter that waited past its limit, with an error that is also a QueueFullError", async () => {
+      const sem = new Semaphore(1);
+      const hold = gatedJob();
+      const running = sem.run(hold.job);
+      const started = performance.now();
+      const err = await sem.run(async () => "never", { waitMs: 80 }).catch((e) => e);
+      expect(err).toBeInstanceOf(QueueTimeoutError);
+      expect(err).toBeInstanceOf(QueueFullError);
+      expect(performance.now() - started).toBeGreaterThanOrEqual(70);
+      expect(performance.now() - started).toBeLessThan(1000);
+      hold.release();
+      await running;
+    });
+
+    it("takes the timed-out waiter out of the line, so it neither blocks the next one nor gets a slot later", async () => {
+      const sem = new Semaphore(1);
+      const hold = gatedJob();
+      const ran: string[] = [];
+      const running = sem.run(hold.job);
+      const gaveUp = sem.run(async () => void ran.push("gave up"), { waitMs: 40 }).catch(() => "timed out");
+      const patient = sem.run(async () => void ran.push("patient"));
+      await gaveUp;
+      expect(sem.queued).toBe(1); // only the patient one is left waiting
+      hold.release();
+      await Promise.all([running, patient]);
+      expect(ran).toEqual(["patient"]);
+      expect(sem.running).toBe(0);
+    });
+
+    it("lets a waiter that gets its turn in time run, and doesn't reject it afterwards", async () => {
+      const sem = new Semaphore(1);
+      const hold = gatedJob();
+      const running = sem.run(hold.job);
+      const waiter = sem.run(async () => "done", { waitMs: 150 });
+      setTimeout(hold.release, 30);
+      await expect(waiter).resolves.toBe("done");
+      await running;
+      await new Promise((resolve) => setTimeout(resolve, 250)); // past the old deadline: nothing must blow up
+      expect(sem.running).toBe(0);
+      expect(sem.queued).toBe(0);
+    });
+
+    it("doesn't apply the limit to a job that gets a slot straight away", async () => {
+      const sem = new Semaphore(1);
+      await expect(sem.run(async () => "immediate", { waitMs: 1 })).resolves.toBe("immediate");
+    });
   });
 
   it("returns the job's value and rejects nonsense limits", async () => {

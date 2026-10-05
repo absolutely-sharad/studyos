@@ -8,7 +8,8 @@ import { detectKind } from "@/lib/documents/extract";
 import { processPending } from "@/lib/documents/process";
 import { STALE_SECONDS } from "@/lib/documents/queue";
 import { CATEGORY_LABELS, toDocumentView } from "@/lib/documents/serialize";
-import { uploadGate } from "@/lib/documents/upload-gate";
+import { BodyStalledError, BodyTooLargeError, readBody } from "@/lib/documents/read-body";
+import { enterUpload, UPLOAD_BODY_IDLE_MS, UPLOAD_BODY_TOTAL_MS, UPLOAD_WAIT_MS, uploadGate } from "@/lib/documents/upload-gate";
 import { matchesKind, SAFE_MIME } from "@/lib/documents/validate";
 import { log } from "@/lib/log";
 import { hit, RULES, waitMessage } from "@/lib/rate-limit";
@@ -60,12 +61,17 @@ export async function POST(request: Request) {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES)
     return fail(`That file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, 413);
 
+  // One account can't hold every slot, and nobody waits in line for long: past that, "busy, retrying".
+  const leave = enterUpload(ctx.userId);
+  if (!leave) return fail("You already have uploads in progress. This one will be retried in a moment.", 503, { "Retry-After": "3" });
   let response: NextResponse;
   try {
-    response = await uploadGate.run(() => receive(request, ctx));
+    response = await uploadGate.run(() => receive(request, ctx), { waitMs: UPLOAD_WAIT_MS });
   } catch (err) {
     if (err instanceof QueueFullError) return fail("The server is busy right now. Your upload will be retried in a moment.", 503, { "Retry-After": "5" });
     throw err;
+  } finally {
+    leave();
   }
   // Reading the file happens after the response is sent; the client polls GET for real status.
   if (response.status === 201) after(() => processPending());
@@ -76,8 +82,12 @@ export async function POST(request: Request) {
 async function receive(request: Request, ctx: { userId: string; exam: { id: string } }): Promise<NextResponse> {
   let form: FormData;
   try {
-    form = await request.formData();
-  } catch {
+    // Read the body ourselves so a client that stalls (or lies about its size) gives its slot back quickly.
+    const body = await readBody(request, { maxBytes: MAX_BODY_BYTES, idleMs: UPLOAD_BODY_IDLE_MS, totalMs: UPLOAD_BODY_TOTAL_MS });
+    form = await new Response(body, { headers: { "content-type": request.headers.get("content-type") ?? "" } }).formData();
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return fail(`That file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, 413);
+    if (err instanceof BodyStalledError) return fail("The upload stalled and was stopped. Check your connection and try again.", 408);
     return fail("The upload was incomplete. Try again.", 400);
   }
   const file = form.get("file");
