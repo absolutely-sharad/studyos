@@ -1,0 +1,382 @@
+// StudyOS — Sharad Solutions
+// MVP schema. Hierarchy for v1 is Exam → Subject → Topic (chapter kept as a field);
+// Unit/Chapter tables, PYQ/Question, Quiz and Notification models arrive in later phases.
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+// Connection URL lives in prisma.config.ts (Prisma 7).
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector]
+}
+
+// ───────────── Auth (Auth.js) ─────────────
+
+model User {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime? @db.Timestamptz(3)
+  image         String?
+  passwordHash  String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(3)
+
+  accounts   Account[]
+  sessions   Session[]
+  preference UserPreference?
+  exams      Exam[]
+  documents  Document[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid(7)) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  sessionToken String   @unique
+  userId       String   @db.Uuid
+  expires      DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime @db.Timestamptz(3)
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model UserPreference {
+  id                String   @id @default(uuid(7)) @db.Uuid
+  userId            String   @unique @db.Uuid
+  timezone          String   @default("Asia/Kolkata")
+  learningStyles    String[]
+  externalResources Boolean  @default(false)
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// ───────────── Exam & syllabus ─────────────
+
+enum ExamCategory {
+  COMPETITIVE
+  UNIVERSITY
+  PLACEMENT
+  INTERVIEW
+  CERTIFICATION
+  CUSTOM
+}
+
+enum KnowledgeLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  UNSURE
+}
+
+enum TopicStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  NEEDS_REVISION
+}
+
+enum Source {
+  AI
+  USER
+}
+
+enum DependencyKind {
+  HARD
+  RECOMMENDED
+  RELATED
+}
+
+model Exam {
+  id                  String       @id @default(uuid(7)) @db.Uuid
+  userId              String       @db.Uuid
+  name                String
+  category            ExamCategory
+  customCategory      String?
+  examDate            DateTime     @db.Date
+  targetScore         String?
+  isActive            Boolean      @default(true)
+  /// Study minutes available per weekday, keyed "0" (Sunday) … "6" (Saturday)
+  weeklyMinutes       Json
+  /// "YYYY-MM-DD" dates the student cannot study
+  unavailableDates    String[]
+  preferredTimes      String[]
+  bufferPercent       Int          @default(10)
+  syllabusConfirmedAt DateTime?    @db.Timestamptz(3)
+  createdAt           DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime     @updatedAt @db.Timestamptz(3)
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjects  Subject[]
+  topics    Topic[]
+  documents Document[]
+  plans     StudyPlan[]
+  tasks     StudyTask[]
+  changes   PlanChange[]
+
+  @@index([userId, isActive])
+  @@map("exams")
+}
+
+model Subject {
+  id     String         @id @default(uuid(7)) @db.Uuid
+  examId String         @db.Uuid
+  name   String
+  order  Int
+  level  KnowledgeLevel @default(UNSURE)
+
+  exam   Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  topics Topic[]
+
+  @@index([examId])
+  @@map("subjects")
+}
+
+model Topic {
+  id               String      @id @default(uuid(7)) @db.Uuid
+  examId           String      @db.Uuid
+  subjectId        String      @db.Uuid
+  name             String
+  chapter          String?
+  description      String?
+  aliases          String[]
+  order            Int
+  /// 1 (easy) … 5 (hard)
+  difficulty       Int         @default(3)
+  /// 1 (low) … 5 (critical) — syllabus importance, user-editable
+  importance       Int         @default(3)
+  estimatedMinutes Int         @default(120)
+  pyqFrequency     Int         @default(0)
+  /// 0 … 100
+  mastery          Int         @default(0)
+  priorityScore    Float       @default(0)
+  priorityReasons  String[]
+  status           TopicStatus @default(NOT_STARTED)
+  confidence       Float       @default(1)
+  source           Source      @default(AI)
+  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime    @updatedAt @db.Timestamptz(3)
+
+  exam          Exam              @relation(fields: [examId], references: [id], onDelete: Cascade)
+  subject       Subject           @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  prerequisites TopicDependency[] @relation("dependent")
+  dependents    TopicDependency[] @relation("prerequisite")
+  tasks         StudyTask[]
+
+  @@index([examId])
+  @@index([subjectId])
+  @@map("topics")
+}
+
+model TopicDependency {
+  id             String         @id @default(uuid(7)) @db.Uuid
+  prerequisiteId String         @db.Uuid
+  dependentId    String         @db.Uuid
+  kind           DependencyKind @default(HARD)
+  confidence     Float          @default(1)
+
+  prerequisite Topic @relation("prerequisite", fields: [prerequisiteId], references: [id], onDelete: Cascade)
+  dependent    Topic @relation("dependent", fields: [dependentId], references: [id], onDelete: Cascade)
+
+  @@unique([prerequisiteId, dependentId])
+  @@index([dependentId])
+  @@map("topic_dependencies")
+}
+
+// ───────────── Documents ─────────────
+
+enum DocumentCategory {
+  SYLLABUS
+  NOTES
+  TEXTBOOK
+  PYQ
+  QUESTION_BANK
+  REVISION_NOTES
+  OTHER
+}
+
+enum ProcessingStatus {
+  UPLOADED
+  EXTRACTING
+  CHUNKING
+  READY
+  NEEDS_OCR
+  FAILED
+}
+
+model Document {
+  id                   String           @id @default(uuid(7)) @db.Uuid
+  examId               String           @db.Uuid
+  userId               String           @db.Uuid
+  filename             String
+  mimeType             String
+  sizeBytes            Int
+  category             DocumentCategory
+  /// USER (student chose it), NAME (guessed from file name) or CONTENT (detected from the text)
+  categorySource       CategorySource   @default(USER)
+  /// What the text looks like, even when the student chose another category
+  detectedCategory     DocumentCategory?
+  detectionNote        String?
+  storageKey           String
+  status               ProcessingStatus @default(UPLOADED)
+  pageCount            Int?
+  extractionConfidence Float?
+  error                String?
+  createdAt            DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime         @updatedAt @db.Timestamptz(3)
+
+  exam   Exam            @relation(fields: [examId], references: [id], onDelete: Cascade)
+  user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks DocumentChunk[]
+
+  @@index([examId, category])
+  @@index([userId])
+  @@map("documents")
+}
+
+model DocumentChunk {
+  id         String                       @id @default(uuid(7)) @db.Uuid
+  documentId String                       @db.Uuid
+  chunkIndex Int
+  pageNumber Int?
+  content    String
+  tokenCount Int
+  /// Filled by the embedding job (RAG phase). Dimension matches the embedding model.
+  embedding  Unsupported("vector(1024)")?
+  createdAt  DateTime                     @default(now()) @db.Timestamptz(3)
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@map("document_chunks")
+}
+
+// ───────────── Planning ─────────────
+
+enum TaskType {
+  LEARN
+  PRACTICE
+  REVISION
+  MOCK
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+  MISSED
+}
+
+model StudyPlan {
+  id                  String    @id @default(uuid(7)) @db.Uuid
+  examId              String    @db.Uuid
+  version             Int       @default(1)
+  isActive            Boolean   @default(true)
+  projectedCompletion DateTime? @db.Date
+  finalRevisionStart  DateTime? @db.Date
+  unscheduledMinutes  Int       @default(0)
+  warnings            String[]
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime  @updatedAt @db.Timestamptz(3)
+
+  exam    Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
+  tasks   StudyTask[]
+  changes PlanChange[]
+
+  @@index([examId, isActive])
+  @@map("study_plans")
+}
+
+model StudyTask {
+  id          String     @id @default(uuid(7)) @db.Uuid
+  planId      String     @db.Uuid
+  examId      String     @db.Uuid
+  topicId     String?    @db.Uuid
+  date        DateTime   @db.Date
+  order       Int
+  type        TaskType
+  title       String
+  minutes     Int
+  status      TaskStatus @default(TODO)
+  source      Source     @default(AI)
+  pinned      Boolean    @default(false)
+  notes       String?
+  /// 1 very difficult … 5 easy
+  rating      Int?
+  completedAt DateTime?  @db.Timestamptz(3)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime   @updatedAt @db.Timestamptz(3)
+
+  plan  StudyPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  exam  Exam      @relation(fields: [examId], references: [id], onDelete: Cascade)
+  topic Topic?    @relation(fields: [topicId], references: [id], onDelete: SetNull)
+
+  @@index([examId, date])
+  @@index([planId])
+  @@index([topicId])
+  @@map("study_tasks")
+}
+
+model PlanChange {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  planId    String   @db.Uuid
+  examId    String   @db.Uuid
+  reason    String
+  summary   String
+  details   Json
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  plan StudyPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  exam Exam      @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+  @@index([examId, createdAt])
+  @@map("plan_changes")
+}
+
+enum CategorySource {
+  USER
+  NAME
+  CONTENT
+}

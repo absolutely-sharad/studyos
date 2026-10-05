@@ -1,0 +1,51 @@
+{
+  "name": "studyos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-powered adaptive study planning platform",
+  "author": {
+    "name": "Sharad Singh Kushwaha",
+    "company": "Sharad Solutions",
+    "url": "https://github.com/absolutely-sharad"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "@auth/prisma-adapter": "^2.11.3",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.2",
+    "bcryptjs": "^3.0.3",
+    "mammoth": "^1.13.0",
+    "next": "^16.3.8",
+    "next-auth": "5.0.0-beta.32",
+    "pg": "^8.23.1",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "unpdf": "^1.8.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22",
+    "@types/pg": "^8.15.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv": "^17.2.0",
+    "prisma": "7.10.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.3"
+  }
+}
