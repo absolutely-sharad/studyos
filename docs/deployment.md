@@ -108,7 +108,7 @@ docker run -d --name studyos -p 3000:3000 \
 | `PROCESSING_MODE` | No | `threads` (default) reads files on worker threads; `inline` reads them in the web process (for hosts without worker threads) |
 | `PROCESSING_TIMEOUT_SECONDS` | No | Give up on one file after this long. Default 180. |
 | `PROCESSING_WORKER_MEMORY_MB` | No | Memory ceiling for each worker thread. Default 768. See [Memory](#memory). |
-| `UPLOAD_CONCURRENCY` | No | Uploads received at the same time per instance. Default 4, with 16 more allowed to wait. |
+| `UPLOAD_CONCURRENCY` | No | Uploads received at the same time per instance. Default 4, with 16 more allowed to wait. One student may use at most half, and the upload page sends two files at once, so keep this at 3 or more. |
 | `PASSWORD_HASH_CONCURRENCY` | No | Password checks run at once per instance. Default: your CPU count minus one, at most 3. |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error`. Default `info`. |
 | `NEXT_PUBLIC_APP_URL` | Recommended | Canonical links and social previews. **Set at build time.** |
@@ -148,7 +148,7 @@ The per-address limits read the first `X-Forwarded-For` entry, which is trustwor
 
 Uploaded files are read in the background, and the web server's main thread never does the heavy work.
 
-1. **Upload**: the file is checked, stored, and a row is added to `documents` with status `UPLOADED` (shown to the student as "Queued"). A few uploads are received at a time (`UPLOAD_CONCURRENCY`) and one account may hold at most half of those slots. A request waits up to 10 seconds for a slot, then gets a quick `503` with `Retry-After`, and the browser retries by itself. A client that stops sending for 15 seconds, or takes over 3 minutes, is dropped with a `408` and its slot is freed.
+1. **Upload**: the file is checked, stored, and a row is added to `documents` with status `UPLOADED` (shown to the student as "Queued"). A few uploads are received at a time (`UPLOAD_CONCURRENCY`) and one account may hold at most half of those slots. A request waits up to 10 seconds for a slot, then gets a quick `503` with `Retry-After`, and the browser retries by itself (after six tries it says the server is still busy and offers a Retry button). A `503` is not counted against the student's upload allowance of 100 per 10 minutes; only an upload that is actually received is. A client that stops sending for 15 seconds, or takes over 3 minutes, is dropped with a `408` and its slot is freed.
 2. **Queue**: the `documents` table is the queue. An instance claims a file with one atomic statement (`FOR UPDATE SKIP LOCKED`), so any number of instances can run at once and never read the same file twice. The line is fair even though files are claimed one at a time: a student's turn counts their own waiting files *and* the files of theirs already being read, so one student uploading a hundred files can't keep the rest waiting. A new upload wakes a pass that is busy with a long file, so a small file isn't held up behind it.
 3. **Read**: parsing the PDF/DOCX, detecting what kind of material it is, and cutting it into chunks happen on a **worker thread** (at most `PROCESSING_CONCURRENCY` at a time). The web process only moves bytes and talks to the database.
 4. **Finish**: chunks are saved and the file becomes `READY`. Files that can't be read end as `FAILED` (with a plain-language reason) or `NEEDS_OCR` (scanned PDFs).
@@ -195,7 +195,7 @@ Avoid `--max-old-space-size` in `NODE_OPTIONS` (some guides recommend it). It is
 
 Passwords are hashed with scrypt (N=2^15, r=8, p=3, about 0.25 s and 32 MB each), which Node runs on its thread pool, so a burst of sign-ins uses other cores instead of freezing the site. At most `PASSWORD_HASH_CONCURRENCY` checks run at once per instance and 50 more may wait; beyond that sign-in and sign-up answer "We're busy right now, try again in a few seconds" immediately. That answer is never counted as a failed attempt.
 
-Accounts created before this change have bcrypt hashes. They still work and are upgraded to scrypt the first time their owner signs in. That one check runs on the main thread (about 0.4 s), and during it a legacy account's sign-in takes a little longer than an unknown email's, so the timing equalisation is complete once everyone has signed in once.
+Accounts created before this change have bcrypt hashes. They still work and are upgraded to scrypt the first time their owner signs in. That one check runs on the main thread (about 0.4 s). Until then a legacy account's sign-in takes about 80 ms longer than an unknown email's (measured 350 ms against 270 ms), so sign-in timing only becomes identical once every account has signed in once. Sign-up already tells a visitor whether an email is registered, so this is a small extra signal rather than a secret the app otherwise keeps.
 
 ### Capacity
 
@@ -223,7 +223,7 @@ The app is stateless apart from the database and file storage, so you can run se
 ## Security summary
 
 - Every query and file read is scoped to the signed-in user.
-- Passwords are hashed with scrypt on a thread pool (older bcrypt hashes are upgraded at next sign-in); sign-in takes the same time whether or not the email exists.
+- Passwords are hashed with scrypt on a thread pool (older bcrypt hashes are upgraded at next sign-in); sign-in does the same hashing whether or not the email exists (accounts still on an older bcrypt hash take about 80 ms longer until their owner signs in once; see [Passwords](#passwords)).
 - Uploads are checked by extension *and* file contents, stored under generated names, and served with a content type derived from the verified file kind, never the browser's claim. PDFs and text open inline; DOCX downloads. The viewer route adds `nosniff`, `no-store`, and a sandboxing Content-Security-Policy for non-PDF files.
 - Every page sends a Content-Security-Policy that limits scripts, frames, forms and connections to the app itself (plus Google Fonts), `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` and HSTS.
 - Dependencies are audited in CI (`npm audit --audit-level=high`) and updated weekly by Dependabot.
