@@ -1,3 +1,4 @@
+import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
 import { LEVEL_FACTOR } from "@/lib/config";
 import { diffDays, formatDay, formatMinutes, fromDateKey, toDateKey, type DateKey } from "@/lib/dates";
@@ -22,15 +23,15 @@ interface PlanComputation {
 
 const isStudy = (type: string) => type === "LEARN" || type === "PRACTICE";
 
-async function computePlan(examId: string, today: DateKey): Promise<PlanComputation> {
-  const exam = await db.exam.findUniqueOrThrow({ where: { id: examId } });
+async function computePlan(client: Prisma.TransactionClient, examId: string, today: DateKey): Promise<PlanComputation> {
+  const exam = await client.exam.findUniqueOrThrow({ where: { id: examId } });
   const [scored, tasks, plan] = await Promise.all([
-    scoreTopics(examId),
-    db.studyTask.findMany({
+    scoreTopics(client, examId),
+    client.studyTask.findMany({
       where: { examId },
       select: { topicId: true, date: true, type: true, minutes: true, status: true, pinned: true, updatedAt: true },
     }),
-    db.studyPlan.findFirst({ where: { examId, isActive: true } }),
+    client.studyPlan.findFirst({ where: { examId, isActive: true } }),
   ]);
 
   const completed = new Map<string, number>();
@@ -150,23 +151,30 @@ function summarize(c: PlanComputation, mode: "initial" | "replan"): PlanSummary 
 
 /** Dry run: what a replan would do. Nothing is saved. */
 export async function previewReplan(examId: string, today: DateKey) {
-  return summarize(await computePlan(examId, today), "replan");
+  return summarize(await computePlan(db, examId, today), "replan");
 }
 
-/** Builds or rebuilds the plan from today. Pinned, completed and past tasks are kept. */
+/**
+ * Builds or rebuilds the plan from today. Pinned, completed and past tasks are kept.
+ *
+ * Everything runs in one transaction behind a per-exam lock, so the plan, its tasks, the change log
+ * and the topic scores are saved together or not at all. Without the lock, a double-click on
+ * "Confirm" (or two open tabs) could both see "no plan yet" and create two active plans.
+ */
 export async function applyPlan(examId: string, today: DateKey, mode: "initial" | "replan", reason: string) {
-  const c = await computePlan(examId, today);
-  const summary = summarize(c, mode);
-  const todayDate = fromDateKey(today);
-  const planData = {
-    projectedCompletion: c.output.projectedCompletion ? fromDateKey(c.output.projectedCompletion) : null,
-    finalRevisionStart: c.output.finalRevisionStart ? fromDateKey(c.output.finalRevisionStart) : null,
-    unscheduledMinutes: c.output.unscheduledMinutes,
-    warnings: c.output.warnings,
-  };
-
-  await db.$transaction(
+  return db.$transaction(
     async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${examId}))`;
+      const c = await computePlan(tx, examId, today);
+      const summary = summarize(c, mode);
+      const todayDate = fromDateKey(today);
+      const planData = {
+        projectedCompletion: c.output.projectedCompletion ? fromDateKey(c.output.projectedCompletion) : null,
+        finalRevisionStart: c.output.finalRevisionStart ? fromDateKey(c.output.finalRevisionStart) : null,
+        unscheduledMinutes: c.output.unscheduledMinutes,
+        warnings: c.output.warnings,
+      };
+
       const plan = c.planId
         ? await tx.studyPlan.update({ where: { id: c.planId }, data: { ...planData, version: { increment: 1 } } })
         : await tx.studyPlan.create({ data: { examId, ...planData } });
@@ -199,9 +207,9 @@ export async function applyPlan(examId: string, today: DateKey, mode: "initial" 
           details: JSON.parse(JSON.stringify(summary)),
         },
       });
+      await saveScores(tx, examId, c.scored);
+      return summary;
     },
-    { timeout: 30_000 },
+    { timeout: 60_000, maxWait: 15_000 },
   );
-  await saveScores(examId, c.scored);
-  return summary;
 }

@@ -1,4 +1,4 @@
-import { db } from "@/lib/db";
+import type { Prisma } from "@/generated/prisma/client";
 import { documentText } from "@/lib/documents/process";
 import { countMentions, questionKeys } from "@/lib/pyq/frequency";
 import { computePriorities, type PriorityResult } from "./priority";
@@ -15,8 +15,8 @@ export interface ScoredTopic {
 }
 
 /** Loads topics with fresh PYQ counts and priority scores (not yet saved). */
-export async function scoreTopics(examId: string): Promise<ScoredTopic[]> {
-  const topics = await db.topic.findMany({
+export async function scoreTopics(client: Prisma.TransactionClient, examId: string): Promise<ScoredTopic[]> {
+  const topics = await client.topic.findMany({
     where: { examId },
     orderBy: { order: "asc" },
     include: {
@@ -25,11 +25,11 @@ export async function scoreTopics(examId: string): Promise<ScoredTopic[]> {
     },
   });
 
-  const pyqDocs = await db.document.findMany({
+  const pyqDocs = await client.document.findMany({
     where: { examId, category: { in: ["PYQ", "QUESTION_BANK"] }, status: "READY" },
     select: { id: true },
   });
-  const keys = questionKeys(await Promise.all(pyqDocs.map((d) => documentText(d.id))));
+  const keys = questionKeys(await Promise.all(pyqDocs.map((d) => documentText(d.id, client))));
 
   const withPyq = topics.map((t) => ({
     ...t,
@@ -60,13 +60,11 @@ export async function scoreTopics(examId: string): Promise<ScoredTopic[]> {
   }));
 }
 
-export async function saveScores(examId: string, scored: ScoredTopic[]) {
-  await db.$transaction(
-    scored.map((t) =>
-      db.topic.update({
-        where: { id: t.id, examId },
-        data: { pyqFrequency: t.pyqFrequency, priorityScore: t.priority.score, priorityReasons: t.priority.reasons },
-      }),
-    ),
-  );
+export async function saveScores(client: Prisma.TransactionClient, examId: string, scored: ScoredTopic[]) {
+  for (const t of scored) {
+    await client.topic.update({
+      where: { id: t.id, examId },
+      data: { pyqFrequency: t.pyqFrequency, priorityScore: t.priority.score, priorityReasons: t.priority.reasons },
+    });
+  }
 }

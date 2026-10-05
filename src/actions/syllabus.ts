@@ -6,7 +6,9 @@ import { z } from "zod";
 import { LEVEL_START_MASTERY } from "@/lib/config";
 import { db } from "@/lib/db";
 import { applyPlan } from "@/lib/planner/service";
+import { hit, RULES, waitMessage } from "@/lib/rate-limit";
 import { requireExam } from "@/lib/session";
+import { aiEnabled } from "@/lib/syllabus/llm";
 import { draftSyllabus, saveDraft } from "@/lib/syllabus/service";
 
 export interface ActionState {
@@ -16,7 +18,12 @@ export interface ActionState {
 
 /** Reads uploaded syllabus files (+ pasted text) and saves a draft topic map for review. */
 export async function buildTopicMap(_: ActionState, form: FormData): Promise<ActionState> {
-  const { exam } = await requireExam();
+  const { user, exam } = await requireExam();
+  // Each build can cost an AI call, so cap how often one account can trigger it.
+  if (aiEnabled()) {
+    const verdict = await hit(RULES.topicMap, user.id);
+    if (!verdict.ok) return { error: waitMessage(verdict) };
+  }
   const pasted = String(form.get("pasted") ?? "").slice(0, 100_000);
   const { draft, note } = await draftSyllabus(exam.id, exam.name, pasted);
   if (!draft) return { error: note ?? "No topics were found." };
@@ -179,15 +186,19 @@ export async function confirmSyllabus(): Promise<ActionState> {
 
   // Starting mastery comes from the level the student chose for each subject.
   const subjects = await db.subject.findMany({ where: { examId: exam.id } });
-  for (const s of subjects) {
-    await db.topic.updateMany({
-      where: { subjectId: s.id, status: "NOT_STARTED", mastery: 0 },
-      data: { mastery: LEVEL_START_MASTERY[s.level] },
-    });
-  }
+  await db.$transaction(
+    subjects.map((s) =>
+      db.topic.updateMany({
+        where: { subjectId: s.id, status: "NOT_STARTED", mastery: 0 },
+        data: { mastery: LEVEL_START_MASTERY[s.level] },
+      }),
+    ),
+  );
 
-  await db.exam.update({ where: { id: exam.id }, data: { syllabusConfirmedAt: new Date() } });
+  // Build the plan first and mark the syllabus confirmed last. If planning fails the student stays on
+  // the review screen and can simply try again, instead of landing on an empty dashboard.
   await applyPlan(exam.id, today, "initial", "Syllabus confirmed");
+  await db.exam.update({ where: { id: exam.id }, data: { syllabusConfirmedAt: new Date() } });
   revalidatePath("/", "layout");
   redirect("/dashboard?welcome=1");
 }
