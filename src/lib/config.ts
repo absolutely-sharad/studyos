@@ -9,6 +9,17 @@ export const brand = {
   tagline: "AI-powered adaptive study planning.",
 };
 
+/**
+ * Public origin, used for canonical links, the sitemap and social previews.
+ * NEXT_PUBLIC_ values are baked in at build time, so set this before `npm run build`.
+ */
+export const siteUrl = (
+  process.env.NEXT_PUBLIC_APP_URL ||
+  process.env.AUTH_URL ||
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "") ||
+  "http://localhost:3000"
+).replace(/\/+$/, "");
+
 export const LEVEL_FACTOR = {
   BEGINNER: 1.3,
   INTERMEDIATE: 1,

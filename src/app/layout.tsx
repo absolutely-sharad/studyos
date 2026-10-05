@@ -1,11 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { brand } from "@/lib/config";
+import { brand, siteUrl } from "@/lib/config";
 import "./globals.css";
 
 const description =
   "Turn your syllabus, PDFs and PYQs into an intelligent study plan that continuously adapts to your progress.";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: { default: `${brand.appName} — AI-Powered Adaptive Study Planning`, template: `%s · ${brand.appName}` },
   description,
   applicationName: brand.appName,
@@ -30,7 +31,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        {/* eslint-disable-next-line @next/next/no-page-custom-font */}
         <link
           rel="stylesheet"
           href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&display=swap"

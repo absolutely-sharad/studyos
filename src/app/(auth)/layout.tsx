@@ -1,5 +1,8 @@
+import type { Metadata } from "next";
 import { Wordmark } from "@/components/brand";
 import { brand } from "@/lib/config";
+
+export const metadata: Metadata = { robots: { index: false, follow: true } };
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (

@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { documentText } from "@/lib/documents/process";
+import { log } from "@/lib/log";
 import { parseSyllabusText } from "./heuristic";
 import { aiEnabled, extractSyllabusWithAI } from "./llm";
 import type { SyllabusDraft } from "./types";
@@ -20,7 +21,7 @@ export async function draftSyllabus(examId: string, examName: string, pastedText
     try {
       draft = await extractSyllabusWithAI(text, examName);
     } catch (err) {
-      console.error("AI syllabus extraction failed", err);
+      log.error("AI syllabus extraction failed", err, { examId });
       note = "AI extraction wasn't available, so the built-in parser was used. Review the topics carefully.";
     }
   }

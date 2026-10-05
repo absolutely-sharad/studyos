@@ -1,9 +1,13 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { AppNav } from "@/components/app-nav";
 import { Wordmark } from "@/components/brand";
 import { diffDays, toDateKey, todayKey } from "@/lib/dates";
 import { db } from "@/lib/db";
 import { getActiveExam, requireUser } from "@/lib/session";
+
+// Signed-in pages have nothing for a search engine to index.
+export const metadata: Metadata = { robots: { index: false, follow: false } };
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
