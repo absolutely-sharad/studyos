@@ -24,7 +24,8 @@ Out of scope: denial of service through volume, issues in third-party services, 
 
 - Every query is scoped to the signed-in user; documents, plans and progress are never shared across accounts.
 - Passwords are hashed with scrypt (OWASP-minimum parameters), run on a thread pool so a burst of sign-ins can't freeze the server, and capped at 128 bytes. Older bcrypt hashes still verify and are upgraded at the next sign-in. Sign-in takes the same time whether or not the email exists, and a server that is too busy answers "try again" without counting it against the account.
-- Uploaded files are read on worker threads with their own time and memory limits, so a hostile or enormous file can only take down its own worker.
+- Uploaded files are read on worker threads with their own time limit and a memory ceiling covering heap and buffers, enforced from outside the worker, so a hostile file (including a small one that decompresses to gigabytes) can only take down its own worker. A file that keeps crashing the server is given up on after three attempts.
+- Uploads are received under a deadline (no data for 15 seconds, or 3 minutes in total) and a per-account limit, so one client can't hold every upload slot.
 - Sign-in, sign-up, uploads, AI calls and account deletion are rate limited per address and per account, in the database, so limits hold across server instances. The limits apply to the Auth.js endpoint itself, not only the login form.
 - Uploads are validated by extension and by file contents, stored under generated names, and served with a content type derived from the verified file kind (never the browser's claim), `nosniff`, `no-store`, and a sandboxing Content-Security-Policy for non-PDF files. Only the owner can read a file.
 - Every page sends a Content-Security-Policy, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` and HSTS.

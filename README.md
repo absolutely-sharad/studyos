@@ -118,7 +118,7 @@ Documents are already split into page-aware chunks stored in `document_chunks`, 
 
 ## Getting started
 
-Requirements: Node.js 20.19+ (22 recommended) and PostgreSQL 15+ with the `pgvector` extension (Supabase and Neon both work).
+Requirements: Node.js 20.19+ (22.16 or later recommended: it enables the memory limit on uploaded-file workers) and PostgreSQL 15+ with the `pgvector` extension (Supabase and Neon both work).
 
 ```bash
 git clone https://github.com/absolutely-sharad/studyos.git

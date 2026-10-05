@@ -148,8 +148,8 @@ The per-address limits read the first `X-Forwarded-For` entry, which is trustwor
 
 Uploaded files are read in the background, and the web server's main thread never does the heavy work.
 
-1. **Upload**: the file is checked, stored, and a row is added to `documents` with status `UPLOADED` (shown to the student as "Queued"). A few uploads are received at a time (`UPLOAD_CONCURRENCY`); beyond that the answer is a quick `503` with `Retry-After`, and the browser retries by itself.
-2. **Queue**: the `documents` table is the queue. An instance claims a file with one atomic statement (`FOR UPDATE SKIP LOCKED`), so any number of instances can run at once and never read the same file twice. The line is fair: everyone's first waiting file goes before anyone's second, so one student uploading a hundred files can't keep the rest waiting.
+1. **Upload**: the file is checked, stored, and a row is added to `documents` with status `UPLOADED` (shown to the student as "Queued"). A few uploads are received at a time (`UPLOAD_CONCURRENCY`) and one account may hold at most half of those slots. A request waits up to 10 seconds for a slot, then gets a quick `503` with `Retry-After`, and the browser retries by itself. A client that stops sending for 15 seconds, or takes over 3 minutes, is dropped with a `408` and its slot is freed.
+2. **Queue**: the `documents` table is the queue. An instance claims a file with one atomic statement (`FOR UPDATE SKIP LOCKED`), so any number of instances can run at once and never read the same file twice. The line is fair even though files are claimed one at a time: a student's turn counts their own waiting files *and* the files of theirs already being read, so one student uploading a hundred files can't keep the rest waiting. A new upload wakes a pass that is busy with a long file, so a small file isn't held up behind it.
 3. **Read**: parsing the PDF/DOCX, detecting what kind of material it is, and cutting it into chunks happen on a **worker thread** (at most `PROCESSING_CONCURRENCY` at a time). The web process only moves bytes and talks to the database.
 4. **Finish**: chunks are saved and the file becomes `READY`. Files that can't be read end as `FAILED` (with a plain-language reason) or `NEEDS_OCR` (scanned PDFs).
 
@@ -158,9 +158,11 @@ Things that go wrong, and what happens:
 | Situation | Result |
 | --- | --- |
 | A file takes longer than `PROCESSING_TIMEOUT_SECONDS` | Its worker is discarded; the student sees "Reading this file took too long" |
-| A file needs more memory than a worker may use | Only that worker dies; the student sees "too large or complex"; the web process is untouched |
+| A file needs more memory than a worker may use, including a small file that decompresses to gigabytes | The memory watchdog (below) terminates that worker within about 100 ms of it passing the ceiling; the student sees "too large or complex"; the web process is untouched |
 | A worker crashes | The file fails with a generic message and is logged; a fresh worker handles the next file |
 | The server restarts mid-read | The file is picked up again after 5 minutes (by the 30-second sweeper on a normal server, or the next request on serverless) |
+| A file keeps killing the whole server | Each pick-up is counted. After 3 starts the file is marked `FAILED` ("We couldn't read this file…") instead of being tried again, so it can crash the server at most 3 times |
+| A client stalls or trickles an upload | Dropped after 15 s without data or 3 minutes in total (`408`), freeing its slot |
 | Workers can't start on this host | One loud `document workers cannot start here` error is logged and files are read in the web process from then on. Set `PROCESSING_MODE=inline` to choose that on purpose. |
 | PDFs over 1,500 pages | Refused with a message asking for smaller files |
 
@@ -168,7 +170,14 @@ Starting processing: every upload and every file-list request calls it (so serve
 
 #### Memory
 
-Each worker has its own memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 768), so a worst case is `PROCESSING_CONCURRENCY × 768 MB` on top of the web process. Measured on 21 MB PDFs: about 190 MB idle and about 900 MB at peak with 20 uploads in flight. The sizes below are estimates built from those numbers, not measurements, so watch memory after you deploy:
+Each worker has a memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 768) covering its heap **and** the buffers it allocates, so the worst case is about `PROCESSING_CONCURRENCY × 768 MB` on top of the web process. It is enforced two ways:
+
+- V8's own heap limit for the worker, and
+- a **memory watchdog**: while a file is being read, the pool checks the worker's heap plus buffers every 100 ms (`worker.getHeapStatistics()`, which answers even while the worker is busy) and terminates it above the ceiling. This matters because V8's heap limit does not count the buffers a decompressor allocates, and a 1 MB file can inflate to gigabytes. Measured: a 1.5 MB PDF that inflates to 1.5 GB was stopped at 807 MB, 36 ms after it crossed 800 MB.
+
+The watchdog needs **Node 22.16 or later**. On an older Node the server logs a warning at the first upload and only the heap limit applies, which a crafted file can get around. The Docker image uses Node 22. `PROCESSING_MODE=inline` (or the automatic fallback when workers can't start) reads files inside the web process and has **no** memory protection.
+
+Measured on 21 MB PDFs: about 190 MB idle and about 900 MB at peak with 20 uploads in flight. The sizes below are estimates built from those numbers, not measurements, so watch memory after you deploy:
 
 | Container memory | Settings |
 | --- | --- |
@@ -176,7 +185,7 @@ Each worker has its own memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 7
 | 1 GB | `PROCESSING_CONCURRENCY=2`, `UPLOAD_CONCURRENCY=3` |
 | 2 GB or more | the defaults |
 
-**Do not set `--max-old-space-size` through `NODE_OPTIONS`** (some guides recommend it). It is process-wide, and it overrides every worker's own limit, so a bad file could use that much memory. If it is set, the server logs `Document workers can use up to N MB each, not the M MB set by PROCESSING_WORKER_MEMORY_MB` at the first upload.
+Avoid `--max-old-space-size` in `NODE_OPTIONS` (some guides recommend it). It is process-wide and overrides V8's heap limit for every worker. The watchdog still enforces `PROCESSING_WORKER_MEMORY_MB`, but only between its 100 ms checks, so a file can overshoot. If the flag is set, the server logs a warning at the first upload.
 
 ### Passwords
 
