@@ -28,7 +28,7 @@ Personalized roadmap + Daily tasks + Revision + Practice + Adaptive replanning
 
 | Area | What it does |
 | --- | --- |
-| Accounts | Email/password and Google sign-in. Every query is scoped to the signed-in user. |
+| Accounts | Email/password and Google sign-in, with brute-force limits. Every query is scoped to the signed-in user. Students can delete their account and all their files from Settings. |
 | Onboarding | Exam type, date, target, daily study hours per weekday, preferred times, learning style. |
 | Materials | Upload up to 20 PDF, DOCX or TXT files at once by selecting several or dragging them in. Each file's type (syllabus, previous-year paper, question bank, textbook, notes, revision notes) is detected from its **content**: exam headers, marks and time limits mark a past paper; units, credits and course outcomes mark a syllabus; an ISBN and preface mark a textbook. The app shows the evidence ("It shows maximum marks, states a time limit…"), never overrides a type the student chose, and suggests a change when the content disagrees. Uploads run 3 at a time with progress bars, failed files can be retried, and duplicates are skipped. The server reads at most 3 files at a time per instance and resumes files interrupted by a restart. The UI shows real pipeline states (queued, reading text, indexing pages, ready). Scanned PDFs are detected by text-extraction confidence and flagged. All syllabus files are merged into one topic map, and every previous-year paper counts toward priorities. |
 | Topic map | Claude extracts subjects, chapters, topics, prerequisites, difficulty and time estimates. Without an API key, a rule-based parser does it. Duplicate topics ("Binary Search" / "binary searching") are merged with aliases. |
@@ -58,7 +58,7 @@ _Captured from an automated end-to-end run. Fonts fall back to system fonts in t
 
 ```
 Browser (Next.js App Router, React 19, Tailwind 4)
-  │  server components + server actions + 3 route handlers
+  │  server components + server actions + 4 route handlers
   ▼
 Next.js server
   ├── Auth.js v5 (credentials + Google, JWT sessions)
@@ -81,8 +81,9 @@ src/
     (app)/                signed-in shell: dashboard, plan, syllabus, topics, setup, settings
     study/[taskId]/       focus mode
     api/documents/        upload, status polling, file viewer
-  actions/                server actions (exam, documents, syllabus, tasks, plan, settings)
+  actions/                server actions (exam, documents, syllabus, tasks, plan, settings, account)
   lib/
+    rate-limit.ts, storage.ts, env.ts, log.ts   operations: limits, file storage drivers, startup checks, logging
     planner/              graph, priority, schedule, health, service  ← the core engine
     syllabus/             AI extraction, heuristic parser, normalisation
     documents/            extraction, chunking, processing pipeline
@@ -124,7 +125,7 @@ git clone https://github.com/absolutely-sharad/studyos.git
 cd studyos
 cp .env.example .env          # fill in DATABASE_URL and AUTH_SECRET
 npm install                   # also runs prisma generate
-npm run db:migrate -- --name init
+npm run db:deploy             # applies the committed migrations
 npm run dev                   # http://localhost:3000
 ```
 
@@ -133,33 +134,31 @@ Generate `AUTH_SECRET` with `npx auth secret`.
 Run checks:
 
 ```bash
-npm test            # planner and parser tests
+npm run lint
 npm run typecheck
+npm test            # unit tests; add TEST_DATABASE_URL=... to also run the database tests
 npm run build
 ```
 
+`npm run db:check` explains in plain English what is wrong with `DATABASE_URL`, if the app can't reach the database.
+
 ### Environment variables
+
+Only two are required. The rest are optional, and the full reference is in [docs/deployment.md](docs/deployment.md#environment-variables).
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `AUTH_SECRET` | Yes | Session signing secret |
-| `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` | No | Shows "Continue with Google" when both are set |
+| `AUTH_SECRET` | Yes | Session signing secret (32+ characters in production) |
+| `AUTH_URL` | In production | Public address of the app |
 | `ANTHROPIC_API_KEY` | No | AI syllabus extraction; the built-in parser is used without it |
-| `ANTHROPIC_MODEL` | No | Defaults to `claude-sonnet-5-5` |
-| `UPLOAD_DIR` | No | Local upload folder, defaults to `.uploads` |
-| `PROCESSING_CONCURRENCY` | No | Files read at the same time per server instance, defaults to 3 |
-| `NEXT_PUBLIC_DEVELOPER_NAME`, `NEXT_PUBLIC_COMPANY_NAME`, `NEXT_PUBLIC_GITHUB_URL` | No | Attribution (defaults set) |
-| `NEXT_PUBLIC_LINKEDIN_URL` | No | LinkedIn link; hidden until set |
-| `SECURITY_CONTACT_EMAIL` | No | Shown in SECURITY.md process |
+| `STORAGE_DRIVER` | No | `local` (default) or `supabase`. Serverless hosts need `supabase`. |
 
 ### Deploying
 
-Works on Vercel, Railway or any Node host. Before production:
+StudyOS ships a `Dockerfile` (web app and migration job), CI, and a production runbook. **[docs/deployment.md](docs/deployment.md)** has the checklist, Docker and Vercel steps, storage setup, rate limits, monitoring, backups, and the things that are still missing (password reset and email verification, a privacy policy, a processing queue).
 
-- Replace local-disk storage in `src/lib/storage.ts` with S3, Cloudflare R2 or Supabase Storage. Serverless file systems are not persistent.
-- Move document processing to a queue (Inngest, BullMQ or Trigger.dev) for large files.
-- Set `AUTH_URL` to your domain if your host requires it.
+In short: provision Postgres with `pgvector`, set the environment variables, run `npm run db:deploy` on every release, and point an uptime monitor at `/api/health`. The server checks its configuration on start and refuses to boot in production if it is wrong.
 
 ## API surface
 
@@ -169,6 +168,7 @@ Works on Vercel, Railway or any Node host. Before production:
 | `/api/documents` | GET | Documents and processing status for the active exam |
 | `/api/documents` | POST | Multipart upload (`file`, `category`), processing starts after response |
 | `/api/documents/[id]/file` | GET | Owner-only file viewer, supports `#page=N` for PDFs |
+| `/api/health` | GET | `200` when the app can reach its database, `503` otherwise. For uptime monitors and load balancers. |
 
 Everything else is a typed server action in `src/actions/`, each of which checks the session and ownership.
 
@@ -182,6 +182,7 @@ Everything else is a typed server action in `src/actions/`, each of which checks
 
 ## Roadmap
 
+- [ ] Password reset and email verification (needs transactional email)
 - [ ] LLM fallback for document types the rules can't decide
 - [ ] OCR for scanned PDFs (Tesseract or a vision model), with page numbers
 - [ ] Embeddings + hybrid retrieval (pgvector) and an AI study coach with tool calls and citations

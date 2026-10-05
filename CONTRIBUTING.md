@@ -8,10 +8,18 @@ StudyOS turns a student's syllabus, materials and previous-year papers into a de
 
 ## Development setup
 
+You need Node 20.19+ and PostgreSQL 15+ with the `pgvector` extension. The quickest way to get one:
+
 ```bash
-cp .env.example .env
+docker run -d --name studyos-db -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=studyos pgvector/pgvector:pg16
+```
+
+Then:
+
+```bash
+cp .env.example .env     # set DATABASE_URL and AUTH_SECRET (npx auth secret)
 npm install
-npm run db:migrate -- --name init
+npm run db:deploy        # applies the committed migrations
 npm run dev
 ```
 
@@ -25,18 +33,21 @@ npm run dev
 
 - One focused change per PR, with a description of what changed and why.
 - Screenshots for any UI change (desktop and mobile).
-- Database changes include a Prisma migration.
+- Database changes include a Prisma migration: edit `prisma/schema.prisma`, run `npm run db:migrate -- --name what_changed`, and commit the new folder in `prisma/migrations`. CI fails if the schema and migrations disagree.
 - No secrets, real user data or uploaded files in commits.
 
 ## Testing requirements
 
-All of these must pass:
+All of these must pass (CI runs them):
 
 ```bash
-npm test
+npm run lint
 npm run typecheck
+npm test
 npm run build
 ```
+
+`npm test` also runs the database tests when `TEST_DATABASE_URL` points at a migrated Postgres, for example `TEST_DATABASE_URL=$DATABASE_URL npm test`. They cover the rate limiter and plan building, including concurrent builds. Without the variable they are skipped.
 
 Planner, priority or health changes need tests in `tests/planner.test.ts`. Never break a hard constraint: exam date, daily capacity, unavailable days, prerequisites, completed and pinned work.
 
@@ -45,4 +56,7 @@ Planner, priority or health changes need tests in `tests/planner.test.ts`. Never
 - TypeScript strict mode; no `any` without a comment explaining why.
 - Every server action and route handler checks the session and resource ownership.
 - Planning logic stays deterministic and free of I/O. Database access lives in `service.ts` files.
+- Log with `log` from `@/lib/log`, never `console`. Log ids, not emails, passwords or file contents.
+- Files go through `@/lib/storage`, never `fs` directly, so they keep working on serverless hosts.
+- Anything that can cost money or be abused (AI calls, uploads, sign-in) goes through `@/lib/rate-limit`.
 - UI copy is plain, in sentence case, and never guilt-trips the student.
