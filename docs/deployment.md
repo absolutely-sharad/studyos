@@ -177,7 +177,7 @@ Each worker has a memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 768) co
 
 The watchdog needs **Node 22.16 or later**. On an older Node the server logs a warning at the first upload and only the heap limit applies, which a crafted file can get around. The Docker image uses Node 22. `PROCESSING_MODE=inline` (or the automatic fallback when workers can't start) reads files inside the web process and has **no** memory protection.
 
-Measured: about 190 MB idle, about 900 MB at peak with 20 large uploads in flight, and a worker that hits the ceiling takes the process to roughly the web baseline plus the whole ceiling (959 MB with the default). Memory a worker used is not always handed back to the operating system when it ends (875 MB idle after two decompression bombs, against 190 MB before), so plan for the peak, not the idle figure.
+Measured: about 190 MB idle, about 1 GB at peak with 20 large uploads in flight, and a worker that hits the ceiling takes the process to roughly the web baseline plus the whole ceiling (959 MB with the default). Memory a worker used is not always handed back to the operating system when it ends (875 MB idle after two decompression bombs, against 190 MB before), so plan for the peak, not the idle figure.
 
 Size the container so that **about 400 MB (the web process and upload buffers) + `PROCESSING_CONCURRENCY` × `PROCESSING_WORKER_MEMORY_MB`** fits. Ready-made combinations (computed from that rule, not each separately tested):
 
