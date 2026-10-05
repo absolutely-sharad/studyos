@@ -1,8 +1,10 @@
+import type { Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
-import { readStoredFile } from "@/lib/storage";
+import { log } from "@/lib/log";
+import { readStoredFile, StorageNotFoundError } from "@/lib/storage";
 import { chunkPages } from "./chunk";
 import { classifyDocument, describeReasons } from "./classify";
-import { detectKind, extractDocument } from "./extract";
+import { DocumentError, detectKind, extractDocument } from "./extract";
 
 const OCR_THRESHOLD = 0.35;
 
@@ -26,7 +28,8 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 
 /** Runs after the upload response is sent. Each status maps to a real pipeline stage. */
 export function processDocument(documentId: string) {
-  return withSlot(() => processOne(documentId));
+  // Never rejects: this runs detached from any request, where a throw would be an unhandled rejection.
+  return withSlot(() => processOne(documentId)).catch((err) => log.error("document processing crashed", err, { documentId }));
 }
 
 async function processOne(documentId: string) {
@@ -87,16 +90,21 @@ async function processOne(documentId: string) {
     ]);
     await db.document.update({ where: { id: doc.id }, data: { status: "READY" } });
   } catch (err) {
-    await db.document.update({
-      where: { id: doc.id },
-      data: { status: "FAILED", error: err instanceof Error ? err.message : "Processing failed." },
-    });
+    // Parser errors can mention file paths and internals, so only our own messages reach the student.
+    const message =
+      err instanceof DocumentError
+        ? err.message
+        : err instanceof StorageNotFoundError
+          ? "The file is missing from storage. Remove it and upload it again."
+          : "We couldn't read this file. It may be damaged or password-protected. Try re-saving it as a new PDF, or upload a different copy.";
+    if (!(err instanceof DocumentError)) log.error("document processing failed", err, { documentId: doc.id });
+    await db.document.update({ where: { id: doc.id }, data: { status: "FAILED", error: message } });
   }
 }
 
-/** Full text of a processed document, rebuilt from its chunks. */
-export async function documentText(documentId: string) {
-  const chunks = await db.documentChunk.findMany({
+/** Full text of a processed document, rebuilt from its chunks. Pass `client` to read inside a transaction. */
+export async function documentText(documentId: string, client: Prisma.TransactionClient = db) {
+  const chunks = await client.documentChunk.findMany({
     where: { documentId },
     orderBy: { chunkIndex: "asc" },
     select: { content: true },

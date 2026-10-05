@@ -12,6 +12,12 @@ export interface Extraction {
 
 export type DocumentKind = "pdf" | "docx" | "text";
 
+/** A failure whose message is safe to show the student (anything else is logged, not shown). */
+export class DocumentError extends Error {}
+
+/** Guards CPU and memory: a 25 MB PDF can still hold thousands of pages. */
+export const MAX_PDF_PAGES = 1500;
+
 export const ACCEPTED_TYPES: Record<string, DocumentKind> = {
   "application/pdf": "pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
@@ -31,6 +37,8 @@ export async function extractDocument(data: Buffer, kind: DocumentKind): Promise
   if (kind === "pdf") {
     const { extractText, getDocumentProxy } = await import("unpdf");
     const pdf = await getDocumentProxy(new Uint8Array(data));
+    if (pdf.numPages > MAX_PDF_PAGES)
+      throw new DocumentError(`This PDF has ${pdf.numPages} pages. The limit is ${MAX_PDF_PAGES}. Split it into smaller files and upload those.`);
     const { totalPages, text } = await extractText(pdf, { mergePages: false });
     const pages = text.map((t, i) => ({ page: i + 1, text: t }));
     const chars = pages.reduce((s, p) => s + p.text.replace(/\s/g, "").length, 0);
