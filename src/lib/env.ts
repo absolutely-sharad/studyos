@@ -51,9 +51,19 @@ export function checkEnv(env: Env): EnvReport {
     else warnings.push("STORAGE_DRIVER=local keeps uploads on this machine's disk. Mount a persistent volume at UPLOAD_DIR and back it up.");
   }
 
-  const concurrency = get("PROCESSING_CONCURRENCY");
-  if (concurrency && !(Number.isInteger(Number(concurrency)) && Number(concurrency) >= 1))
-    warnings.push("PROCESSING_CONCURRENCY should be a whole number of 1 or more; the default of 3 is used.");
+  const wholeNumbers: [string, number][] = [
+    ["PROCESSING_CONCURRENCY", 3],
+    ["PROCESSING_TIMEOUT_SECONDS", 180],
+    ["PROCESSING_WORKER_MEMORY_MB", 768],
+    ["UPLOAD_CONCURRENCY", 4],
+    ["PASSWORD_HASH_CONCURRENCY", 3],
+  ];
+  for (const [name, fallback] of wholeNumbers) {
+    const value = get(name);
+    if (value && !(Number.isInteger(Number(value)) && Number(value) >= 1)) warnings.push(`${name} should be a whole number of 1 or more; the default of ${fallback} is used.`);
+  }
+  const mode = get("PROCESSING_MODE");
+  if (mode && mode !== "threads" && mode !== "inline") warnings.push(`PROCESSING_MODE should be "threads" or "inline", not "${mode}"; "threads" is used.`);
 
   if (production && !get("ANTHROPIC_API_KEY")) warnings.push("ANTHROPIC_API_KEY is not set, so the built-in rule-based syllabus parser is used.");
 

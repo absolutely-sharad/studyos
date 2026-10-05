@@ -86,7 +86,8 @@ docker run -d --name studyos -p 3000:3000 \
 1. Import the repository. The default build command (`npm run build`) works as is.
 2. Set the environment variables below. Use `STORAGE_DRIVER=supabase`, a pooled `DATABASE_URL`, and `DATABASE_POOL_MAX=1`.
 3. Run `npm run db:deploy` against the production database before the first deploy and on each release that adds a migration (a GitHub Action or your own terminal both work).
-4. Request time limits: the upload route allows 60 seconds. Building a topic map with AI can take over a minute on a long syllabus, so confirm your plan's function duration covers it. If the call times out the app falls back to its built-in parser and tells the student.
+4. Document reading starts from `after()` on each upload and each file-list request (the 30-second sweeper is not run on Vercel). Worker threads are used there too; this has not been verified on Vercel. If they can't start, one error is logged and files are read in the function instead, or set `PROCESSING_MODE=inline` to choose that.
+5. Request time limits: the upload route allows 60 seconds. Building a topic map with AI can take over a minute on a long syllabus, so confirm your plan's function duration covers it. If the call times out the app falls back to its built-in parser and tells the student.
 
 ## Environment variables
 
@@ -103,7 +104,12 @@ docker run -d --name studyos -p 3000:3000 \
 | `STORAGE_DRIVER` | No | `local` (default) or `supabase` |
 | `UPLOAD_DIR` | No | Folder for `local` storage. Default `.uploads` (`/data/uploads` in the image). |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` | With `supabase` | Storage credentials. Bucket defaults to `studyos-documents`. |
-| `PROCESSING_CONCURRENCY` | No | Files read at once per instance. Default 3. |
+| `PROCESSING_CONCURRENCY` | No | Files read at the same time per instance. Default 3. |
+| `PROCESSING_MODE` | No | `threads` (default) reads files on worker threads; `inline` reads them in the web process (for hosts without worker threads) |
+| `PROCESSING_TIMEOUT_SECONDS` | No | Give up on one file after this long. Default 180. |
+| `PROCESSING_WORKER_MEMORY_MB` | No | Memory ceiling for each worker thread. Default 768. See [Memory](#memory). |
+| `UPLOAD_CONCURRENCY` | No | Uploads received at the same time per instance. Default 4, with 16 more allowed to wait. |
+| `PASSWORD_HASH_CONCURRENCY` | No | Password checks run at once per instance. Default: your CPU count minus one, at most 3. |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error`. Default `info`. |
 | `NEXT_PUBLIC_APP_URL` | Recommended | Canonical links and social previews. **Set at build time.** |
 | `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_COMPANY_NAME`, `NEXT_PUBLIC_DEVELOPER_NAME`, `NEXT_PUBLIC_GITHUB_URL`, `NEXT_PUBLIC_LINKEDIN_URL` | No | Branding. **Set at build time.** |
@@ -140,13 +146,60 @@ The per-address limits read the first `X-Forwarded-For` entry, which is trustwor
 
 ### Document processing
 
-Files are read after the upload response is sent (`after()`), at most `PROCESSING_CONCURRENCY` at a time per instance. A file stuck mid-pipeline for over 5 minutes (for example because the server restarted) is picked up again the next time the student's file list is loaded. PDFs over 1,500 pages are rejected with a message asking for smaller files.
+Uploaded files are read in the background, and the web server's main thread never does the heavy work.
 
-For large volumes, move this to a queue (Inngest, BullMQ, Trigger.dev). Nothing else needs to change: `processDocument(id)` is the single entry point.
+1. **Upload**: the file is checked, stored, and a row is added to `documents` with status `UPLOADED` (shown to the student as "Queued"). A few uploads are received at a time (`UPLOAD_CONCURRENCY`); beyond that the answer is a quick `503` with `Retry-After`, and the browser retries by itself.
+2. **Queue**: the `documents` table is the queue. An instance claims a file with one atomic statement (`FOR UPDATE SKIP LOCKED`), so any number of instances can run at once and never read the same file twice. The line is fair: everyone's first waiting file goes before anyone's second, so one student uploading a hundred files can't keep the rest waiting.
+3. **Read**: parsing the PDF/DOCX, detecting what kind of material it is, and cutting it into chunks happen on a **worker thread** (at most `PROCESSING_CONCURRENCY` at a time). The web process only moves bytes and talks to the database.
+4. **Finish**: chunks are saved and the file becomes `READY`. Files that can't be read end as `FAILED` (with a plain-language reason) or `NEEDS_OCR` (scanned PDFs).
+
+Things that go wrong, and what happens:
+
+| Situation | Result |
+| --- | --- |
+| A file takes longer than `PROCESSING_TIMEOUT_SECONDS` | Its worker is discarded; the student sees "Reading this file took too long" |
+| A file needs more memory than a worker may use | Only that worker dies; the student sees "too large or complex"; the web process is untouched |
+| A worker crashes | The file fails with a generic message and is logged; a fresh worker handles the next file |
+| The server restarts mid-read | The file is picked up again after 5 minutes (by the 30-second sweeper on a normal server, or the next request on serverless) |
+| Workers can't start on this host | One loud `document workers cannot start here` error is logged and files are read in the web process from then on. Set `PROCESSING_MODE=inline` to choose that on purpose. |
+| PDFs over 1,500 pages | Refused with a message asking for smaller files |
+
+Starting processing: every upload and every file-list request calls it (so serverless hosts work), and a normal server also runs a sweeper every 30 seconds. Workers start on demand and exit after 60 idle seconds.
+
+#### Memory
+
+Each worker has its own memory ceiling (`PROCESSING_WORKER_MEMORY_MB`, default 768), so a worst case is `PROCESSING_CONCURRENCY × 768 MB` on top of the web process. Measured on 21 MB PDFs: about 190 MB idle and about 900 MB at peak with 20 uploads in flight. The sizes below are estimates built from those numbers, not measurements, so watch memory after you deploy:
+
+| Container memory | Settings |
+| --- | --- |
+| 512 MB | `PROCESSING_CONCURRENCY=1`, `UPLOAD_CONCURRENCY=2`, `PROCESSING_WORKER_MEMORY_MB=256` |
+| 1 GB | `PROCESSING_CONCURRENCY=2`, `UPLOAD_CONCURRENCY=3` |
+| 2 GB or more | the defaults |
+
+**Do not set `--max-old-space-size` through `NODE_OPTIONS`** (some guides recommend it). It is process-wide, and it overrides every worker's own limit, so a bad file could use that much memory. If it is set, the server logs `Document workers can use up to N MB each, not the M MB set by PROCESSING_WORKER_MEMORY_MB` at the first upload.
+
+### Passwords
+
+Passwords are hashed with scrypt (N=2^15, r=8, p=3, about 0.25 s and 32 MB each), which Node runs on its thread pool, so a burst of sign-ins uses other cores instead of freezing the site. At most `PASSWORD_HASH_CONCURRENCY` checks run at once per instance and 50 more may wait; beyond that sign-in and sign-up answer "We're busy right now, try again in a few seconds" immediately. That answer is never counted as a failed attempt.
+
+Accounts created before this change have bcrypt hashes. They still work and are upgraded to scrypt the first time their owner signs in. That one check runs on the main thread (about 0.4 s), and during it a legacy account's sign-in takes a little longer than an unknown email's, so the timing equalisation is complete once everyone has signed in once.
+
+### Capacity
+
+Measured on one 4-core machine (client, app and database sharing it), one app instance, 1,000 seeded students with about 500 planned tasks each:
+
+| | Result |
+| --- | --- |
+| 100 students browsing at once | comfortable: p95 about 290 ms |
+| 300 students browsing at once | one instance saturates at about 30–35 requests/s; a second instance raised it to 51 requests/s (1.75×) on this machine, which was by then short of cores |
+| Sign-ins | 12.7/s per instance with other users unaffected (`/api/health` stayed at 6 ms); before the change 4/s, with everyone else stalled for seconds |
+| 12 students uploading 250-page textbooks | everyone else's dashboard stayed at 78 ms (it was 2.7 s when parsing ran on the web thread) |
+
+Plan for roughly 100 to 150 actively browsing students per instance and add instances for more. Each instance opens up to `DATABASE_POOL_MAX` connections (default 10), so several instances need a connection pooler or a lower value.
 
 ### Scaling
 
-The app is stateless apart from the database and file storage, so you can run several instances. Plan builds take a per-exam database lock, so two simultaneous builds (a double-click, two tabs) can't create duplicate plans.
+The app is stateless apart from the database and file storage, so you can run several instances. Plan builds take a per-exam database lock, so two simultaneous builds (a double-click, two tabs) can't create duplicate plans. The upload, sign-in and file-reading limits above are per instance; the rate limits (above) and the file queue are shared through the database.
 
 ## Backups and data deletion
 
@@ -157,7 +210,7 @@ The app is stateless apart from the database and file storage, so you can run se
 ## Security summary
 
 - Every query and file read is scoped to the signed-in user.
-- Passwords are hashed with bcrypt (cost 12); sign-in takes the same time whether or not the email exists.
+- Passwords are hashed with scrypt on a thread pool (older bcrypt hashes are upgraded at next sign-in); sign-in takes the same time whether or not the email exists.
 - Uploads are checked by extension *and* file contents, stored under generated names, and served with a content type derived from the verified file kind, never the browser's claim. PDFs and text open inline; DOCX downloads. The viewer route adds `nosniff`, `no-store`, and a sandboxing Content-Security-Policy for non-PDF files.
 - Every page sends a Content-Security-Policy that limits scripts, frames, forms and connections to the app itself (plus Google Fonts), `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy` and HSTS.
 - Dependencies are audited in CI (`npm audit --audit-level=high`) and updated weekly by Dependabot.
@@ -168,5 +221,5 @@ StudyOS does not yet have these. None blocks a launch, but decide each one on pu
 
 - **Password reset and email verification.** There is no email integration, so a student who forgets their password cannot recover the account, and sign-ups are not verified. Google sign-in avoids both. Adding transactional email (for example Resend or any SMTP provider) is the next step.
 - **Privacy policy and terms of service.** Students upload their own material and the app can send syllabus text to Anthropic when AI is enabled. You need a policy that says so, written for where your users live.
-- **A document-processing queue** (see above) and **OCR for scanned PDFs**, which are flagged to the student rather than read.
+- **OCR for scanned PDFs**, which are flagged to the student rather than read. (A separate worker service and a dedicated job queue such as Inngest or BullMQ are optional upgrades: file reading already runs on worker threads fed from the database queue, and `processPending()` in `src/lib/documents/process.ts` is the single entry point to move.)
 - **Error tracking.** Errors are logged but not sent to a service such as Sentry. `onRequestError` in `src/instrumentation.ts` is the place to add it.

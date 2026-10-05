@@ -63,6 +63,20 @@ describe("checkEnv", () => {
     expect(checkEnv({ ...good, NODE_ENV: "development", STORAGE_DRIVER: "local" }).warnings).toEqual([]);
   });
 
+  it("warns about every capacity setting that isn't a whole number, naming it and its default", () => {
+    for (const [name, fallback] of [["PROCESSING_TIMEOUT_SECONDS", 180], ["PROCESSING_WORKER_MEMORY_MB", 768], ["UPLOAD_CONCURRENCY", 4], ["PASSWORD_HASH_CONCURRENCY", 3]] as const) {
+      expect(checkEnv({ ...good, [name]: "0" }).warnings.join(" ")).toContain(`${name} should be a whole number of 1 or more; the default of ${fallback} is used.`);
+      expect(checkEnv({ ...good, [name]: "2.5" }).warnings.join(" ")).toContain(name);
+      expect(checkEnv({ ...good, [name]: "8" }).warnings).toEqual([]);
+    }
+  });
+
+  it("checks PROCESSING_MODE", () => {
+    expect(checkEnv({ ...good, PROCESSING_MODE: "threads" }).warnings).toEqual([]);
+    expect(checkEnv({ ...good, PROCESSING_MODE: "inline" }).warnings).toEqual([]);
+    expect(checkEnv({ ...good, PROCESSING_MODE: "forked" }).warnings.join(" ")).toMatch(/PROCESSING_MODE should be "threads" or "inline"/);
+  });
+
   it("warns about a bad PROCESSING_CONCURRENCY and a missing AI key", () => {
     expect(checkEnv({ ...good, PROCESSING_CONCURRENCY: "0" }).warnings.join(" ")).toMatch(/PROCESSING_CONCURRENCY/);
     expect(checkEnv({ ...good, PROCESSING_CONCURRENCY: "abc" }).warnings.join(" ")).toMatch(/PROCESSING_CONCURRENCY/);

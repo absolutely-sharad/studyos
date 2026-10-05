@@ -156,7 +156,7 @@ Only two are required. The rest are optional, and the full reference is in [docs
 
 ### Deploying
 
-StudyOS ships a `Dockerfile` (web app and migration job), CI, and a production runbook. **[docs/deployment.md](docs/deployment.md)** has the checklist, Docker and Vercel steps, storage setup, rate limits, monitoring, backups, and the things that are still missing (password reset and email verification, a privacy policy, a processing queue).
+StudyOS ships a `Dockerfile` (web app and migration job), CI, and a production runbook. **[docs/deployment.md](docs/deployment.md)** has the checklist, Docker and Vercel steps, storage setup, rate limits, monitoring, backups, measured capacity, and the things that are still missing (password reset and email verification, a privacy policy).
 
 In short: provision Postgres with `pgvector`, set the environment variables, run `npm run db:deploy` on every release, and point an uptime monitor at `/api/health`. The server checks its configuration on start and refuses to boot in production if it is wrong.
 
