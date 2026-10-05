@@ -45,11 +45,16 @@ export async function readBody(request: Request, limits: { maxBytes: number; idl
       chunks.push(next.value);
     }
   } catch (err) {
-    // Stop the client's upload instead of leaving the connection half-read.
-    await reader.cancel().catch(() => undefined);
+    // Tell the stream to stop, but don't wait for it: on a live network request the cancel can take until the
+    // server's own request timeout (minutes) to settle, which would keep the caller, and its upload slot, waiting.
+    void reader.cancel().catch(() => undefined);
     throw err;
   } finally {
-    reader.releaseLock?.();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A read is still pending; the cancel above settles it.
+    }
   }
   const body = new Uint8Array(received);
   let offset = 0;

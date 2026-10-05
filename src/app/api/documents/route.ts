@@ -87,7 +87,8 @@ async function receive(request: Request, ctx: { userId: string; exam: { id: stri
     form = await new Response(body, { headers: { "content-type": request.headers.get("content-type") ?? "" } }).formData();
   } catch (err) {
     if (err instanceof BodyTooLargeError) return fail(`That file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, 413);
-    if (err instanceof BodyStalledError) return fail("The upload stalled and was stopped. Check your connection and try again.", 408);
+    // "Connection: close" because the rest of the body never arrived: Node would otherwise hold the socket open for minutes.
+    if (err instanceof BodyStalledError) return fail("The upload stalled and was stopped. Check your connection and try again.", 408, { Connection: "close" });
     return fail("The upload was incomplete. Try again.", 400);
   }
   const file = form.get("file");
